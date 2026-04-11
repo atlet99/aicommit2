@@ -7,6 +7,9 @@
 - [Configuration Guide](../../README.md#configuration) - How to configure providers
 - [General Settings](../../README.md#general-settings) - Common settings applicable to all providers
 
+> [!WARNING]
+> **Deprecated:** The **GitHub Models** provider is deprecated in favor of the **Copilot SDK** provider. The `gh models list` command is no longer supported, and the REST API access will be disabled in upcoming releases. Users should migrate to the Copilot SDK documented in [Copilot SDK](./copilot-sdk.md).
+
 **GitHub Models is separate from GitHub Copilot UI features.**
 
 - **GitHub Copilot**: IDE/chat coding assistant experience
@@ -24,15 +27,15 @@ aicommit2 github-login
 
 This command:
 
-1. Authenticates with GitHub CLI
-2. Stores token in `GITHUB_MODELS.key`
-3. Verifies GitHub Models access
+1. Authenticates with **GitHub CLI** (`gh`).
+2. Stores the token in `GITHUB_MODELS.key`.
+3. Verifies access to the GitHub Models API.
 
 ### Option 2: Manual token setup
 
-1. Create a GitHub Personal Access Token (PAT)
-2. Grant permission: `models: read`
-3. Configure token:
+1. Create a **GitHub Personal Access Token (PAT)**.
+2. Grant the permission `models: read`.
+3. Configure the token:
 
 ```sh
 aicommit2 github-login --token github_pat_xxxxxxxxxxxxxxxxxxxx
@@ -88,45 +91,31 @@ sudo apt install gh
 
 ## Model ID Format (Required)
 
-`GITHUB_MODELS.model` must use this format:
+`GITHUB_MODELS.model` must follow the **`publisher/model`** pattern, e.g.:
 
 ```text
-publisher/model
+openai/gpt-4o-mini
+openai/gpt-5
+openai/gpt-5-chat
+meta/llama-3.3-70b-instruct
 ```
 
-Examples:
-
-- `openai/gpt-4o-mini`
-- `openai/gpt-5`
-- `openai/gpt-5-chat`
-- `meta/llama-3.3-70b-instruct`
-
-Legacy short IDs like `gpt-4o-mini` are invalid for this provider flow in _aicommit2_.
+Short IDs such as `gpt-4o-mini` are **not** accepted by the GitHub Models provider in *aicommit2*.
 
 ## Copilot Plan Limits (Important)
 
-Model access depends on your GitHub Copilot plan and request allowance.
+Model availability is tied to your **GitHub Copilot** subscription:
 
-As of April 2, 2026 (based on current GitHub docs):
+* **Copilot Free** – limited to a few thousand inline suggestions and a small number of premium requests per month. Model choice is restricted.
+* **Paid / Student plans** – unlimited suggestions and chat for the models included in the plan (e.g., `gpt-5`, `gpt-4o`). Premium request quotas apply to higher‑tier models.
 
-- **Copilot Free**: up to `2,000` inline suggestion requests and up to `50` premium requests/month. Model choice is limited.
-- **Paid plans / Copilot Student**: unlimited inline suggestions and unlimited chat interactions for included models (`GPT-5 mini`, `GPT-4.1`, `GPT-4o`), with additional premium request allowances for premium models.
-- GitHub explicitly notes model availability can vary by plan and can change over time.
-- Additional premium request purchases are **not** available on Copilot Free.
+GitHub may change model access without notice, so the list of usable models can differ between the UI and the `models.github.ai` API. If you encounter errors such as:
 
-You can find additional information at the link: [Plans for GitHub Copilot](https://github.com/features/copilot/plans) and [Requests in GitHub Copilot](https://docs.github.com/en/copilot/concepts/billing/copilot-requests).
+* `400 unavailable_model`
+* `403` (permission issue)
+* `429` (rate‑limit)
 
-### Important for aicommit2 users
-
-Even if a model appears available in Copilot UI, it may still be unavailable for your token on `models.github.ai`.
-
-For API usage with _aicommit2_, you may see:
-
-- `400 unavailable_model` (model not currently usable for your token in API context)
-- `403` (permission/entitlement issue)
-- `429` (rate limiting)
-
-When in doubt, run a live check with your own token before setting a default model.
+verify your token and plan, or run a live discovery using the Copilot SDK (see the [Copilot SDK documentation](./copilot-sdk.md)).
 
 ## Validated Snapshot (April 2, 2026)
 
@@ -225,16 +214,11 @@ aicommit2 config set \
 
 ## Discover Available Models
 
-GitHub catalog changes over time. Use live discovery instead of static hardcoded lists.
+**Note:** The `gh models list` command is **deprecated** and no longer maintained. The REST API endpoint for model discovery will be disabled in favor of the **Copilot SDK** workflow. For the current list of supported models, refer to the [Copilot SDK documentation](./copilot-sdk.md).
+
+If you still need to query the legacy catalog (while it remains available), you can use the following REST call, but be aware it will be removed in future releases:
 
 ```bash
-# Install extension once
-gh extension install https://github.com/github/gh-models
-
-# Show available models
-gh models list
-
-# Optional: raw catalog endpoint
 curl -L \
   -H "Accept: application/vnd.github+json" \
   -H "Authorization: Bearer $GITHUB_TOKEN" \
@@ -242,7 +226,7 @@ curl -L \
   https://models.github.ai/catalog/models
 ```
 
-You can find additional information at the link: [GitHub Models inference REST API](https://docs.github.com/en/rest/models/inference).
+See the official docs: <https://docs.github.com/en/rest/models/inference>.
 
 ## API Version
 
@@ -276,11 +260,9 @@ Model ID format is invalid. Use `publisher/model` (example: `openai/gpt-4o-mini`
 
 ## References
 
-You can find additional information at the link:
-
 - [GitHub Models quickstart](https://docs.github.com/en/enterprise-cloud@latest/github-models/quickstart)
 - [GitHub Models inference REST API](https://docs.github.com/en/rest/models/inference)
-- [Plans for GitHub Copilot](https://github.com/features/copilot/plans)
-- [Requests in GitHub Copilot](https://docs.github.com/en/copilot/concepts/billing/copilot-requests)
-- [GitHub REST breaking changes](https://docs.github.com/en/rest/about-the-rest-api/breaking-changes?apiVersion=2026-03-10)
+- [GitHub Copilot plans](https://github.com/features/copilot/plans)
+- [GitHub Copilot billing & requests](https://docs.github.com/en/copilot/concepts/billing/copilot-requests)
+- [GitHub REST API breaking changes (2026-03-10)](https://docs.github.com/en/rest/about-the-rest-api/breaking-changes?apiVersion=2026-03-10)
 - [gh-models extension](https://github.com/github/gh-models)
