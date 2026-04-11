@@ -16,20 +16,21 @@ If you prefer a config file over `aicommit2 config set`, this is a good starting
 ```ini
 logging=true
 generate=1
-locale=ru
+locale=en
 type=conventional
 maxTokens=4096
 temperature=0.2
+topP=0.9
 
 [OPENROUTER]
-envKey=OPENROUTER_BASE_TOKEN
+key=YOUR_OPENROUTER_API_KEY
 model=stepfun/step-3.5-flash:free
 url=https://openrouter.ai
 path=/api/v1/chat/completions
 systemPromptPath=prompts/aicommit_prompt.txt
-responseFormat.type=json_object
-provider.allow_fallbacks=true
-provider.require_parameters=false
+responseFormat='{"type":"json_object"}'
+provider='{"allow_fallbacks":true,"require_parameters":false}'
+reasoning={}
 ```
 
 If `systemPromptPath` is relative, it is resolved from the config file directory.
@@ -68,6 +69,9 @@ aicommit2 config set OPENROUTER.key="your-api-key" \
 | `responseFormat` | OpenRouter `response_format` payload object | - |
 | `provider` | OpenRouter routing controls payload object | - |
 | `reasoning` | OpenRouter reasoning payload object | - |
+| `topP` | Nucleus sampling probability | `0.9` |
+| `temperature` | Sampling temperature | `0.7` |
+| `maxTokens` | Maximum tokens to generate | `4096` |
 
 ## Notes
 
@@ -82,10 +86,10 @@ aicommit2 config set OPENROUTER.key="your-api-key" \
 
 #### OPENROUTER.key
 
-Your OpenRouter API key. You can retrieve it from the OpenRouter dashboard.
+Your OpenRouter API key. Set it via the `key` property (or the environment variable `OPENROUTER_API_KEY`).
 
 ```sh
-aicommit2 config set OPENROUTER.key="your api key"
+aicommit2 config set OPENROUTER.key="your-api-key"
 ```
 
 #### OPENROUTER.model
@@ -117,3 +121,27 @@ aicommit2 config set OPENROUTER.url="https://openrouter.ai"
 Default: `/api/v1/chat/completions`
 
 The chat completions path used by the OpenAI SDK.
+
+#### OPENROUTER.topP
+
+Controls nucleus sampling. Accepts a decimal between 0 and 1 (default `0.9`).
+
+```sh
+aicommit2 config set OPENROUTER.topP=0.9
+```
+
+#### OPENROUTER.temperature
+
+Controls randomness of the model output. Accepts a decimal between 0 and 2 (default `0.7`).
+
+```sh
+aicommit2 config set OPENROUTER.temperature=0.7
+```
+
+#### OPENROUTER.maxTokens
+
+Maximum number of tokens the model may generate (default `4096`).
+
+```sh
+aicommit2 config set OPENROUTER.maxTokens=4096
+```
