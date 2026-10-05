@@ -397,7 +397,7 @@ Run `aicommit2 --help` to see all available options grouped by category.
 
 - `--all` or `-a`: Automatically stage changes in tracked files for the commit (default: **false**)
 - `--confirm` or `-y`: Skip confirmation when committing after message generation (default: **false**)
-- `--auto-select` or `-s`: Automatically select when only one message is generated (default: **false**)
+- `--auto-select` or `-s`: Automatically select the first valid generated message (default: **false**)
 - `--edit` or `-e`: Open the AI-generated commit message in your default editor (default: **false**)
 - `--clipboard` or `-c`: Copy the selected message to clipboard and exit **without committing** (default: **false**)
 - `--dry-run` or `-d`: Generate commit message without committing (default: **false**)
@@ -771,6 +771,7 @@ temperature=0.2
 [OPENROUTER]
 envKey=OPENROUTER_BASE_TOKEN
 model=stepfun/step-3.5-flash:free
+# model=free  # race all JSON-capable free models and use the first valid response
 url=https://openrouter.ai
 path=/api/v1/chat/completions
 systemPromptPath=prompts/aicommit_prompt.txt

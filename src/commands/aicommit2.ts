@@ -240,7 +240,7 @@ export default async (
             process.exit();
         }
 
-        if (confirm || (autoSelect && availableAIs.length === 1)) {
+        if (confirm || autoSelect) {
             await commitChanges(selectedCommitMessage, rawArgv, commitOptions);
             process.exit();
         }
@@ -342,18 +342,26 @@ const handleCommitMessage = async (
     let commitMsgSubscription: Subscription | null = null;
 
     try {
-        if (autoSelect && availableAIs.length === 1) {
-            const messages: CommitChoice[] = [];
+        if (autoSelect) {
+            // Resolve on the first valid response so racing providers/free models show the fastest answer.
+            let firstValidMessage: CommitChoice | null = null;
+            const errorMessages: string[] = [];
             commitMsgPromptManager.startLoader();
 
             commitMsgSubscription = aiRequestManager.createCommitMsgRequests$(availableAIs).subscribe({
                 next: (choice: ReactiveListChoice) => {
-                    // Skip streaming preview/sentinel choices — only collect final results
-                    const isStreamingChoice = 'streamKey' in choice;
-                    if (!isStreamingChoice) {
-                        messages.push(choice as CommitChoice);
-                    }
                     commitMsgPromptManager.refreshChoices(choice);
+
+                    if (choice.isError && choice.value) {
+                        errorMessages.push(choice.value);
+                    }
+
+                    // Skip streaming preview/sentinel choices — only final results can be auto-selected
+                    const isStreamingChoice = 'streamKey' in choice;
+                    if (!firstValidMessage && !isStreamingChoice && choice.value && !choice.isError && !choice.disabled) {
+                        firstValidMessage = choice as CommitChoice;
+                        commitMsgSubscription?.unsubscribe();
+                    }
                 },
                 error: error => {
                     console.error('Commit message generation error:', error);
@@ -369,16 +377,16 @@ const handleCommitMessage = async (
             commitMsgPromptManager.clearLoader();
 
             consoleManager.moveCursorUp(); // NOTE: reactiveListPrompt has 2 blank lines
-            const validMessage = messages.find(msg => msg.value && !msg.isError && !msg.disabled);
-            if (!validMessage || !validMessage.value) {
-                throw new KnownError('No valid commit message was generated');
+            if (!firstValidMessage) {
+                const reason = errorMessages.length > 0 ? ` ${errorMessages.join(' | ')}` : '';
+                throw new KnownError(`No valid commit message was generated.${reason}`);
             }
 
-            consoleManager.print(`\n${validMessage.name}\n`);
+            consoleManager.print(`\n${firstValidMessage.name}\n`);
             return {
-                value: validMessage.value,
-                provider: validMessage.provider || 'unknown',
-                model: validMessage.model || 'unknown',
+                value: firstValidMessage.value,
+                provider: firstValidMessage.provider || 'unknown',
+                model: firstValidMessage.model || 'unknown',
             };
         }
 
@@ -513,7 +521,9 @@ const handleJsonOutput = async (aiRequestManager: AIRequestManager, availableAIs
     const validChoices = choices.filter(choice => choice.value && !choice.isError && !choice.disabled);
 
     if (validChoices.length === 0) {
-        throw new KnownError('No valid commit messages were generated');
+        const errorMessages = choices.filter(choice => choice.isError && choice.value).map(choice => choice.value);
+        const reason = errorMessages.length > 0 ? ` ${errorMessages.join(' | ')}` : '';
+        throw new KnownError(`No valid commit messages were generated.${reason}`);
     }
 
     return validChoices.map(({ value = '' }) => {

@@ -280,13 +280,27 @@ export abstract class AIService {
         return null;
     };
 
+    /**
+     * Compact raw model output for error messages so users can see what actually came back
+     * (e.g. guardrail responses like "User Safety: safe" instead of commit JSON).
+     */
+    protected summarizeRawResponse(text: string): string {
+        const compact = text.replace(/\s+/g, ' ').trim();
+        if (!compact) {
+            return '(empty)';
+        }
+        return compact.length > 200 ? `${compact.slice(0, 200)}...` : compact;
+    }
+
     protected parseMessage(aiGeneratedText: string, type: CommitType, maxCount: number): AIResponse[] {
         const cleanedText = this.cleanJsonCodeBlock(aiGeneratedText);
 
         // Use bracket-matching extraction for robust JSON parsing
         const jsonString = this.extractJsonFromResponse(cleanedText);
         if (!jsonString) {
-            const error: AIServiceError = new Error('AI response did not contain a valid JSON object or array.');
+            const error: AIServiceError = new Error(
+                `AI response did not contain a valid JSON object or array. Raw response: ${this.summarizeRawResponse(aiGeneratedText)}`
+            );
             error.name = 'InvalidJsonResponse';
             error.content = aiGeneratedText;
             throw error;
@@ -420,13 +434,19 @@ export abstract class AIService {
     /**
      * Build a ReactiveListChoice from an AIResponse (title + value).
      */
-    protected formatAsChoice = (data: AIResponse): ReactiveListChoice => ({
-        name: `${this.serviceName} ${data.title}`,
-        short: data.title,
-        value: this.params.config.includeBody ? data.value : data.title,
-        description: this.params.config.includeBody ? data.value : '',
-        isError: false,
-    });
+    protected formatAsChoice = (data: AIResponse): ReactiveListChoice => {
+        const model = Array.isArray(this.params.config.model) ? this.params.config.model[0] : this.params.config.model;
+
+        // `model` is consumed by withProviderMetadata; free-mode races update it to the winning model.
+        return {
+            name: `${this.serviceName} ${data.title}`,
+            short: data.title,
+            value: this.params.config.includeBody ? data.value : data.title,
+            description: this.params.config.includeBody ? data.value : '',
+            isError: false,
+            model: model || undefined,
+        } as ReactiveListChoice;
+    };
 
     /**
      * Extract a human-readable preview from partial JSON streaming buffer.
@@ -606,13 +626,18 @@ export abstract class AIService {
     /**
      * Build a ReactiveListChoice from a code review AIResponse.
      */
-    protected formatCodeReviewAsChoice = (data: AIResponse): ReactiveListChoice => ({
-        name: `${this.serviceName} ${data.title}`,
-        short: data.title,
-        value: data.value,
-        description: data.value,
-        isError: false,
-    });
+    protected formatCodeReviewAsChoice = (data: AIResponse): ReactiveListChoice => {
+        const model = Array.isArray(this.params.config.model) ? this.params.config.model[0] : this.params.config.model;
+
+        return {
+            name: `${this.serviceName} ${data.title}`,
+            short: data.title,
+            value: data.value,
+            description: data.value,
+            isError: false,
+            model: model || undefined,
+        } as ReactiveListChoice;
+    };
 
     private formatReviewSummaryTitle = (summary: string, items: CodeReviewItem[]): string => {
         const counts = items.reduce(

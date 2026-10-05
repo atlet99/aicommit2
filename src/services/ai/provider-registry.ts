@@ -39,8 +39,9 @@ export const withProviderMetadata = (opts: ProviderMetadataOptions): MonoTypeOpe
 
     return tap({
         next: choice => {
-            // Attach provider metadata to the choice for selection tracking
-            Object.assign(choice, { provider: opts.provider, model: opts.model });
+            // Attach provider metadata to the choice for selection tracking.
+            // Keep a model already set by the service (e.g. the winning model in free-mode races).
+            Object.assign(choice, { provider: opts.provider, model: (choice as { model?: string }).model || opts.model });
 
             // Skip metric recording if stats is disabled (enabled by default)
             if (opts.statsEnabled === false) {
