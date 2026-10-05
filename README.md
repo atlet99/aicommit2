@@ -397,7 +397,7 @@ Run `aicommit2 --help` to see all available options grouped by category.
 
 - `--all` or `-a`: Automatically stage changes in tracked files for the commit (default: **false**)
 - `--confirm` or `-y`: Skip confirmation when committing after message generation (default: **false**)
-- `--auto-select` or `-s`: Automatically select the first valid generated message (default: **false**)
+- `--auto-select` or `-s`: Automatically select the first valid generated message (single provider or OpenRouter `model=free`) (default: **false**)
 - `--edit` or `-e`: Open the AI-generated commit message in your default editor (default: **false**)
 - `--clipboard` or `-c`: Copy the selected message to clipboard and exit **without committing** (default: **false**)
 - `--dry-run` or `-d`: Generate commit message without committing (default: **false**)

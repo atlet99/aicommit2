@@ -19,7 +19,7 @@ import {
     emptyCodeReview,
 } from '../managers/reactive-prompt.manager.js';
 import { recordSelection } from '../services/stats/index.js';
-import { ModelName, RawConfig, applyDisableLowerCaseToConfig, applyIncludeBodyToConfig, getConfig } from '../utils/config.js';
+import { ModelName, RawConfig, ValidConfig, applyDisableLowerCaseToConfig, applyIncludeBodyToConfig, getConfig } from '../utils/config.js';
 import { ErrorCode, ErrorMessages } from '../utils/error-messages.js';
 import { KnownError, handleCliError } from '../utils/error.js';
 import { validateSystemPrompt } from '../utils/prompt.js';
@@ -188,7 +188,7 @@ export default async (
             await handleCodeReview(aiRequestManager, codeReviewAIs);
         }
 
-        const commitResult = await handleCommitMessage(aiRequestManager, availableAIs, autoSelect);
+        const commitResult = await handleCommitMessage(aiRequestManager, availableAIs, autoSelect, isFreeModelRaceConfigured(config));
 
         // Record selection for stats (fire-and-forget, enabled by default)
         if (config.useStats !== false) {
@@ -240,7 +240,7 @@ export default async (
             process.exit();
         }
 
-        if (confirm || autoSelect) {
+        if (confirm || (autoSelect && (availableAIs.length === 1 || isFreeModelRaceConfigured(config)))) {
             await commitChanges(selectedCommitMessage, rawArgv, commitOptions);
             process.exit();
         }
@@ -333,17 +333,26 @@ async function handleCodeReview(aiRequestManager: AIRequestManager, availableAIs
     }
 }
 
+const isFreeModelRaceConfigured = (config: ValidConfig): boolean => {
+    const openrouter = config.OPENROUTER;
+    if (!openrouter || openrouter.disabled) {
+        return false;
+    }
+    return (openrouter.model ?? []).some(entry => entry.trim().toLowerCase() === 'free');
+};
+
 const handleCommitMessage = async (
     aiRequestManager: AIRequestManager,
     availableAIs: ModelName[],
-    autoSelect: boolean
+    autoSelect: boolean,
+    freeModelRace: boolean
 ): Promise<CommitMessageResult> => {
     const commitMsgPromptManager = new ReactivePromptManager(commitMsgLoader);
     let commitMsgSubscription: Subscription | null = null;
 
     try {
-        if (autoSelect) {
-            // Resolve on the first valid response so racing providers/free models show the fastest answer.
+        if (autoSelect && (availableAIs.length === 1 || freeModelRace)) {
+            // Auto-select the first valid response and stop waiting for the rest.
             let firstValidMessage: CommitChoice | null = null;
             const errorMessages: string[] = [];
             commitMsgPromptManager.startLoader();

@@ -280,10 +280,6 @@ export abstract class AIService {
         return null;
     };
 
-    /**
-     * Compact raw model output for error messages so users can see what actually came back
-     * (e.g. guardrail responses like "User Safety: safe" instead of commit JSON).
-     */
     protected summarizeRawResponse(text: string): string {
         const compact = text.replace(/\s+/g, ' ').trim();
         if (!compact) {
@@ -437,7 +433,6 @@ export abstract class AIService {
     protected formatAsChoice = (data: AIResponse): ReactiveListChoice => {
         const model = Array.isArray(this.params.config.model) ? this.params.config.model[0] : this.params.config.model;
 
-        // `model` is consumed by withProviderMetadata; free-mode races update it to the winning model.
         return {
             name: `${this.serviceName} ${data.title}`,
             short: data.title,

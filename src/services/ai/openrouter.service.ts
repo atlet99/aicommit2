@@ -32,7 +32,6 @@ export class OpenRouterService extends AIService {
     private openAI: OpenAI;
     private static readonly catalogCache = new Map<string, OpenRouterModel[]>();
     private static readonly modelCache = new Map<string, OpenRouterModel | null>();
-    /** `model=free` in config races every JSON-capable `:free` model and returns the first valid response. */
     private static readonly FREE_MODEL_KEYWORD = 'free';
     private static readonly FREE_MODEL_RACE_LIMIT = 5;
 
@@ -295,7 +294,6 @@ export class OpenRouterService extends AIService {
     }
 
     generateCommitMessage$(): Observable<ReactiveListChoice> {
-        // Free-model race returns the first valid full response, so streaming is not applicable.
         const isStream = (this.params.config.stream || false) && !this.isFreeModelMode();
 
         if (isStream) {
@@ -457,11 +455,7 @@ export class OpenRouterService extends AIService {
         return this.getRequestedModel().trim().toLowerCase() === OpenRouterService.FREE_MODEL_KEYWORD;
     };
 
-    /**
-     * Free candidates must be able to enforce JSON via response_format.
-     * This also filters out guardrail/classifier models (e.g. content-safety), which never
-     * return commit messages and therefore break the JSON parser.
-     */
+    // Keep only free models that support response_format; guardrail/classifier models never return commit JSON.
     private getFreeJsonCapableModels = async (): Promise<OpenRouterModel[]> => {
         const catalog = await this.fetchOpenRouterCatalog();
 
@@ -500,17 +494,11 @@ export class OpenRouterService extends AIService {
     }
 
     private logRace = (level: 'info' | 'warn', message: string): void => {
-        // Logger is only initialized by the CLI; unit tests exercise this service without it.
         if (isLoggerInitialized()) {
             logger[level](message);
         }
     };
 
-    /**
-     * Send the same request to every JSON-capable free model in parallel and resolve with
-     * the first response that parses into a valid commit message / code review.
-     * Losing requests are not aborted; the process exits once the winner is handled.
-     */
     private async generateFreeModelMessage(requestType: RequestType, systemPrompt: string, userPrompt: string): Promise<AIResponse[]> {
         const candidates = await this.getFreeJsonCapableModels();
         if (candidates.length === 0) {
