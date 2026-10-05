@@ -100,7 +100,7 @@ cli(
             },
             'auto-select': {
                 type: Boolean,
-                description: 'Automatically select the message when only one is generated',
+                description: 'Automatically select the first valid generated message',
                 alias: 's',
                 default: false,
             },
