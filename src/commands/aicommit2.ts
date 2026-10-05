@@ -5,7 +5,7 @@ import path from 'path';
 
 import { execa } from 'execa';
 import inquirer from 'inquirer';
-import { ReactiveListChoice } from 'inquirer-reactive-list-prompt';
+import { ReactiveListChoice, buildBounceFrames } from 'inquirer-reactive-list-prompt';
 import { lastValueFrom, toArray } from 'rxjs';
 
 import { getAvailableAIs } from './get-available-ais.js';
@@ -36,6 +36,8 @@ import {
 import type { Subscription } from 'rxjs';
 
 const consoleManager = new ConsoleManager();
+
+const AUTO_SELECT_SPINNER = { interval: 80, frames: buildBounceFrames(14, 4) };
 
 export interface JsonCommitMessage {
     subject: string;
@@ -355,7 +357,7 @@ const handleCommitMessage = async (
             // Auto-select the first valid response and stop waiting for the rest.
             let firstValidMessage: CommitChoice | null = null;
             const errorMessages: string[] = [];
-            commitMsgPromptManager.startLoader();
+            consoleManager.showLoader(commitMsgLoader.startOption.text, AUTO_SELECT_SPINNER);
 
             commitMsgSubscription = aiRequestManager.createCommitMsgRequests$(availableAIs).subscribe({
                 next: (choice: ReactiveListChoice) => {
@@ -383,9 +385,8 @@ const handleCommitMessage = async (
                 commitMsgSubscription?.add(() => resolve());
             });
 
-            commitMsgPromptManager.clearLoader();
+            consoleManager.stopLoader();
 
-            consoleManager.moveCursorUp(); // NOTE: reactiveListPrompt has 2 blank lines
             if (!firstValidMessage) {
                 const reason = errorMessages.length > 0 ? ` ${errorMessages.join(' | ')}` : '';
                 throw new KnownError(`No valid commit message was generated.${reason}`);
