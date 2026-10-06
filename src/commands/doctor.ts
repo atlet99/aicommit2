@@ -184,6 +184,11 @@ export const summarizeOpenRouterCapabilities = (providerConfig: RawConfig, catal
             continue;
         }
 
+        if (selectedModel === 'free') {
+            messages.push('Free model race enabled');
+            continue;
+        }
+
         const model = matchOpenRouterModel(selectedModel, catalog);
         if (!model) {
             messages.push(`Model not found in catalog: ${selectedModel}`);
@@ -268,15 +273,6 @@ const checkOpenRouterConnection = async (
             return {
                 ok: true,
                 details: `Catalog reachable (${models.length} models)`,
-            };
-        }
-
-        const openRouterAuto = configuredModels.includes('openrouter/auto');
-        if (openRouterAuto) {
-            const notes = summarizeOpenRouterCapabilities(providerConfig, models);
-            return {
-                ok: true,
-                details: notes.length > 0 ? notes.join('; ') : `Auto routing enabled (${models.length} models)`,
             };
         }
 

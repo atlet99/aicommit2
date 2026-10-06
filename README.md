@@ -91,7 +91,7 @@ _aicommit2_ automatically generates commit messages using AI. It supports [Git](
 |----------|---------------|---------------|
 | OpenAI | `gpt-4o-mini` | [Guide](docs/providers/openai.md) |
 | Copilot SDK (Preview) | `gpt-4.1` | [Guide](docs/providers/copilot-sdk.md) |
-| OpenRouter | `openrouter/auto` | [Guide](docs/providers/openrouter.md) |
+| OpenRouter | `free` | [Guide](docs/providers/openrouter.md) |
 | Anthropic | `claude-sonnet-4-20250514` | [Guide](docs/providers/anthropic.md) |
 | Gemini | `gemini-3-flash-preview` | [Guide](docs/providers/gemini.md) |
 | Mistral | `mistral-small-latest` | [Guide](docs/providers/mistral.md) |
@@ -770,8 +770,8 @@ temperature=0.2
 
 [OPENROUTER]
 envKey=OPENROUTER_BASE_TOKEN
-model=stepfun/step-3.5-flash:free
-# model=free  # race all JSON-capable free models and use the first valid response
+# model defaults to free: race JSON-capable free models and use the first valid response
+# model=stepfun/step-3.5-flash:free  # pin a specific model instead
 url=https://openrouter.ai
 path=/api/v1/chat/completions
 systemPromptPath=prompts/aicommit_prompt.txt

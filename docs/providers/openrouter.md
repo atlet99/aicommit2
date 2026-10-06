@@ -23,7 +23,7 @@ temperature=0.2
 
 [OPENROUTER]
 envKey=OPENROUTER_BASE_TOKEN
-model=stepfun/step-3.5-flash:free
+model=free
 url=https://openrouter.ai
 path=/api/v1/chat/completions
 systemPromptPath=prompts/aicommit_prompt.txt
@@ -40,7 +40,7 @@ next to the config file.
 
 ```sh
 aicommit2 config set OPENROUTER.key="your-api-key"
-aicommit2 config set OPENROUTER.model="openrouter/auto"
+aicommit2 config set OPENROUTER.model="free"
 aicommit2 config set OPENROUTER.responseFormat='{"type":"json_object"}'
 aicommit2 config set OPENROUTER.provider='{"allow_fallbacks":true,"require_parameters":false}'
 ```
@@ -62,7 +62,7 @@ aicommit2 config set OPENROUTER.key="your-api-key" \
 | Setting | Description      | Default |
 | ------- | ---------------- | ------- |
 | `key`   | API key          | - |
-| `model` | Model to use, or `free` to race JSON-capable free models | `openrouter/auto` |
+| `model` | Model slug to pin, or `free` to race JSON-capable free models | `free` |
 | `url`   | API endpoint URL | `https://openrouter.ai` |
 | `path`  | API path         | `/api/v1/chat/completions` |
 | `responseFormat` | OpenRouter `response_format` payload object | - |
@@ -90,9 +90,10 @@ aicommit2 config set OPENROUTER.key="your api key"
 
 #### OPENROUTER.model
 
-Default: `openrouter/auto`
+Default: `free`
 
-Use a model slug that OpenRouter exposes, such as:
+Without an explicit model, aicommit2 races JSON-capable free models (see below).
+To pin a specific model, use a slug that OpenRouter exposes, such as:
 
 - `openrouter/auto`
 - `anthropic/claude`
@@ -105,7 +106,7 @@ aicommit2 config set OPENROUTER.model="anthropic/claude"
 
 ##### `model=free` (auto-race free models)
 
-When `OPENROUTER.model` is set to `free`, aicommit2:
+This is the default when `OPENROUTER.model` is not set. With `free`, aicommit2:
 
 1. Fetches the OpenRouter catalog.
 2. Keeps only `:free` models that advertise `response_format` support. Guardrail/classifier models (for example `nvidia/nemotron-3.5-content-safety:free`) never return commit JSON, so they are skipped.

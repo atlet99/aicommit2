@@ -33,8 +33,9 @@ const PROVIDER_INFO: Record<string, ProviderInfo> = {
         displayName: 'OpenRouter',
         authType: 'api-key',
         envKeyHint: 'OPENROUTER_API_KEY',
-        defaultModel: 'openrouter/auto',
-        setupNotes: 'OpenRouter supports many upstream models. You can keep openrouter/auto or choose a specific model slug.',
+        defaultModel: 'free',
+        setupNotes:
+            'By default aicommit2 races JSON-capable free models and uses the first valid response. Set a specific model slug to pin one instead.',
     },
     ANTHROPIC: {
         displayName: 'Anthropic (Claude)',
