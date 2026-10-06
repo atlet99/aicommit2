@@ -6,7 +6,7 @@ import { fromPromise } from 'rxjs/internal/observable/innerFrom';
 
 import { AIResponse, AIService, AIServiceError, AIServiceParams } from './ai.service.js';
 import { RequestType, logAIComplete, logAIError, logAIPayload, logAIPrompt, logAIRequest, logAIResponse } from '../../utils/ai-log.js';
-import { DEFAULT_PROMPT_OPTIONS, PromptOptions, codeReviewPrompt, generatePrompt } from '../../utils/prompt.js';
+import { codeReviewPrompt, generatePrompt } from '../../utils/prompt.js';
 
 export class GroqService extends AIService {
     private groq: Groq;
@@ -76,31 +76,19 @@ export class GroqService extends AIService {
         const { generate, type } = this.params.config;
 
         return this.createStreamingCommitMessages$(
-            subject => {
-                this.streamChunks(subject).catch(err => subject.error(err));
+            (subject, signal) => {
+                this.streamChunks(subject, signal).catch(err => subject.error(err));
             },
             type,
             generate
         );
     };
 
-    private streamChunks = async (subject: Subject<string>): Promise<void> => {
+    private streamChunks = async (subject: Subject<string>, signal: AbortSignal): Promise<void> => {
         const diff = this.params.stagedDiff.diff;
-        const { systemPrompt, systemPromptPath, codeReviewPromptPath, logging, locale, temperature, generate, type, maxLength } =
-            this.params.config;
+        const { logging, temperature } = this.params.config;
         const maxTokens = this.params.config.maxTokens;
-        const promptOptions: PromptOptions = {
-            ...DEFAULT_PROMPT_OPTIONS,
-            locale,
-            maxLength,
-            type,
-            generate,
-            systemPrompt,
-            systemPromptPath,
-            codeReviewPromptPath,
-            vcs_branch: this.params.branchName || '',
-        };
-        const generatedSystemPrompt = generatePrompt(promptOptions);
+        const generatedSystemPrompt = generatePrompt(this.buildPromptOptions());
         const userPrompt = `Here is the diff: ${diff}`;
 
         const baseUrl = this.params.config.url || 'https://api.groq.com';
@@ -133,6 +121,7 @@ export class GroqService extends AIService {
         try {
             const stream = await this.groq.chat.completions.create(payload, {
                 timeout: this.params.config.timeout,
+                signal,
             });
 
             for await (const chunk of stream) {
@@ -157,20 +146,9 @@ export class GroqService extends AIService {
 
     private async generateMessage(requestType: RequestType): Promise<AIResponse[]> {
         const diff = this.params.stagedDiff.diff;
-        const { systemPrompt, systemPromptPath, codeReviewPromptPath, logging, locale, temperature, generate, type, maxLength } =
-            this.params.config;
+        const { logging, temperature, generate, type } = this.params.config;
         const maxTokens = this.params.config.maxTokens;
-        const promptOptions: PromptOptions = {
-            ...DEFAULT_PROMPT_OPTIONS,
-            locale,
-            maxLength,
-            type,
-            generate,
-            systemPrompt,
-            systemPromptPath,
-            codeReviewPromptPath,
-            vcs_branch: this.params.branchName || '',
-        };
+        const promptOptions = this.buildPromptOptions();
         const generatedSystemPrompt = requestType === 'review' ? codeReviewPrompt(promptOptions) : generatePrompt(promptOptions);
         const userPrompt = `Here is the diff: ${diff}`;
 

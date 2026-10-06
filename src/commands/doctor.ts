@@ -3,7 +3,16 @@ import { execSync } from 'child_process';
 import chalk from 'chalk';
 import { command } from 'cleye';
 
-import { hasBedrockAccess, hasConfiguredModels } from './get-available-ais.js';
+import { getConfiguredModels, hasBedrockAccess, hasConfiguredModels, hasCopilotSdkAvailable } from './get-available-ais.js';
+import { version as installedVersion } from '../../package.json';
+import {
+    ALL_COPILOT_SDK_KNOWN_MODELS,
+    buildCopilotSdkClientOptions,
+    isCopilotSdkCliNotFoundError,
+    isCopilotSdkPackageInstalled,
+    normalizeCopilotSdkModel,
+    resolveCopilotSdkToken,
+} from '../services/ai/copilot-sdk.utils.js';
 import {
     GITHUB_MODELS_API_VERSION,
     GITHUB_MODELS_BASE_URL,
@@ -12,8 +21,25 @@ import {
     isValidGitHubModelsModelId,
 } from '../services/ai/github-models.utils.js';
 import { HttpRequestBuilder } from '../services/http/http-request.builder.js';
-import { BUILTIN_SERVICES, BuiltinService, DEFAULT_OLLAMA_HOST, RawConfig, ValidConfig, getConfig } from '../utils/config.js';
+import {
+    BUILTIN_SERVICES,
+    BuiltinService,
+    DEFAULT_OLLAMA_HOST,
+    RawConfig,
+    SUBSCRIPTION_CLI_SERVICES,
+    ValidConfig,
+    getConfig,
+} from '../utils/config.js';
 import { handleCliError } from '../utils/error.js';
+import { findLazygitConfig, hasAicommitIntegration, isLazygitInstalled } from '../utils/lazygit.js';
+import {
+    UPGRADE_COMMANDS,
+    compareVersions,
+    detectInstallSource,
+    fetchLatestVersion,
+    isReleaseVersion,
+    resolveInstalledBinPath,
+} from '../utils/version-check.js';
 
 /**
  * Health check status for a provider
@@ -72,15 +98,6 @@ const STATUS_LABELS: Record<HealthStatus, (text: string) => string> = {
  */
 const hasApiKey = (value: RawConfig): boolean => {
     return typeof value.key === 'string' && value.key.trim().length > 0;
-};
-
-const hasConfiguredModel = (value: RawConfig): boolean => {
-    const models = Array.isArray(value.model)
-        ? (value.model as string[])
-        : typeof value.model === 'string' && value.model.trim().length > 0
-          ? [(value.model as string).trim()]
-          : [];
-    return models.length > 0;
 };
 
 const isNonEmptyObject = (value: unknown): value is Record<string, unknown> => {
@@ -263,11 +280,7 @@ const checkOpenRouterConnection = async (
 
         const models = response.data?.data ?? [];
 
-        const configuredModels = hasConfiguredModel(providerConfig)
-            ? Array.isArray(providerConfig.model)
-                ? (providerConfig.model as string[])
-                : [providerConfig.model as string]
-            : [];
+        const configuredModels = getConfiguredModels(providerConfig);
 
         if (configuredModels.length === 0) {
             return {
@@ -372,48 +385,154 @@ const checkGitHubModelsConnection = async (
     }
 };
 
-const checkCopilotSdkEnvironment = (providerConfig: RawConfig): { ok: boolean; error?: string; details?: string } => {
-    const model = Array.isArray(providerConfig.model)
-        ? String(providerConfig.model[0] || '').trim()
-        : String(providerConfig.model || '').trim();
-    if (!model) {
-        return { ok: false, error: 'No model configured' };
+// Minimal shape of the lazily-imported Copilot SDK client used by the auth probe.
+type CopilotProbeClient = {
+    start: () => Promise<void>;
+    getAuthStatus: () => Promise<{ isAuthenticated?: boolean; authType?: string }>;
+    stop?: () => Promise<unknown> | unknown;
+};
+
+const withTimeout = <T>(promise: Promise<T>, ms: number, message: string): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(message)), ms);
+        promise.then(
+            value => {
+                clearTimeout(timer);
+                resolve(value);
+            },
+            error => {
+                clearTimeout(timer);
+                reject(error);
+            }
+        );
+    });
+
+/**
+ * Actually authenticate against the Copilot SDK the same way a real request does:
+ * spawn the CLI server with the resolved auth options and call getAuthStatus.
+ * This closes the gap where doctor reported "healthy" on CLI presence alone while
+ * runtime auth failed (issue #259).
+ */
+const probeCopilotSdkAuth = async (
+    timeout: number
+): Promise<{ ok: boolean; authenticated: boolean; authType?: string; error?: string }> => {
+    let client: CopilotProbeClient | undefined;
+    try {
+        const sdkModule = (await import('@github/copilot-sdk')) as unknown as {
+            CopilotClient: new (options?: unknown) => CopilotProbeClient;
+        };
+        const options = buildCopilotSdkClientOptions(process.env, resolveCopilotSdkToken(process.env));
+        client = new sdkModule.CopilotClient(options);
+        const timeoutMessage = 'Copilot SDK authentication check timed out';
+        await withTimeout(client.start(), timeout, timeoutMessage);
+        const status = await withTimeout(client.getAuthStatus(), timeout, timeoutMessage);
+        return { ok: true, authenticated: status.isAuthenticated === true, authType: status.authType };
+    } catch (error) {
+        return { ok: false, authenticated: false, error: error instanceof Error ? error.message : String(error) };
+    } finally {
+        if (client?.stop) {
+            try {
+                await client.stop();
+            } catch {
+                // Ignore stop failures so they don't mask the probe result.
+            }
+        }
+    }
+};
+
+// Static (non-network) prerequisites for COPILOT_SDK. Returns a failure reason,
+// or null when the environment is ready for the live auth probe.
+const checkCopilotSdkPrereqs = (): { error: string; details?: string } | null => {
+    const copilotEnvToken = (process.env.COPILOT_GITHUB_TOKEN || '').trim();
+    if (copilotEnvToken.startsWith('ghp_')) {
+        return {
+            error: 'Unsupported classic PAT in COPILOT_GITHUB_TOKEN',
+            details: 'Copilot CLI requires Fine-Grained PAT (github_pat_...) or Copilot login flow',
+        };
     }
 
+    const nodeMajor = Number(process.versions.node.split('.')[0] || '0');
+    if (Number.isFinite(nodeMajor) && nodeMajor < 22) {
+        return {
+            error: `Node.js ${process.versions.node} is too old for Copilot SDK`,
+            details: 'Copilot SDK requires Node.js 22+',
+        };
+    }
+
+    if (!isCopilotSdkPackageInstalled()) {
+        return {
+            error: '@github/copilot-sdk package not installed',
+            details:
+                'The optional dependency is missing (common with Homebrew or --omit=optional installs). Install with: npm install -g @github/copilot-sdk',
+        };
+    }
+
+    return null;
+};
+
+const checkCopilotSdkEnvironment = async (
+    providerConfig: RawConfig,
+    timeout: number
+): Promise<{ ok: boolean; error?: string; details?: string; modelWarning?: string }> => {
+    // Callers gate on a configured model before reaching here, so this is never empty.
+    // The service's own `|| COPILOT_SDK_DEFAULT_MODEL` fallback cannot stand in for it:
+    // the fan-out is `from(getModels(ai))` (ai-request.manager.ts), so an empty model
+    // list emits zero requests and the service default is never consulted.
+    const model = getConfiguredModels(providerConfig)[0] || '';
+
+    const prereqFailure = checkCopilotSdkPrereqs();
+    if (prereqFailure) {
+        return { ok: false, ...prereqFailure };
+    }
+
+    const nodeVersion = process.versions.node;
+    // Global `copilot` binary is informational only: the SDK spawns its own
+    // bundled CLI from @github/copilot, so a missing global install is fine.
+    let version = '';
     try {
-        const copilotEnvToken = (process.env.COPILOT_GITHUB_TOKEN || '').trim();
-        if (copilotEnvToken.startsWith('ghp_')) {
-            return {
-                ok: false,
-                error: 'Unsupported classic PAT in COPILOT_GITHUB_TOKEN',
-                details: 'Copilot CLI requires Fine-Grained PAT (github_pat_...) or Copilot login flow',
-            };
-        }
-
-        const nodeVersion = process.versions.node;
-        const nodeMajor = Number(nodeVersion.split('.')[0] || '0');
-        if (Number.isFinite(nodeMajor) && nodeMajor < 22) {
-            return {
-                ok: false,
-                error: `Node.js ${nodeVersion} is too old for Copilot SDK`,
-                details: 'Copilot SDK v0.2.0 requires node:sqlite support (Node.js 22+ recommended)',
-            };
-        }
-
-        const version = execSync('copilot --version', { stdio: ['ignore', 'pipe', 'pipe'] })
+        version = execSync('copilot --version', { stdio: ['ignore', 'pipe', 'pipe'] })
             .toString()
             .trim();
-        return {
-            ok: true,
-            details: version ? `CLI: ${version}; Model: ${model}; Node: ${nodeVersion}` : `Model: ${model}; Node: ${nodeVersion}`,
-        };
     } catch {
+        version = '';
+    }
+
+    // Probe real authentication, not just CLI presence (issue #259).
+    const auth = await probeCopilotSdkAuth(timeout);
+    if (!auth.ok) {
+        if (isCopilotSdkCliNotFoundError(auth.error || '')) {
+            return {
+                ok: false,
+                error: 'Copilot CLI runtime is missing or broken',
+                details: `${auth.error}. Reinstall: npm install -g aicommit2 @github/copilot-sdk`,
+            };
+        }
         return {
             ok: false,
-            error: 'Copilot CLI not found',
-            details: 'Install and authenticate Copilot CLI before using COPILOT_SDK provider',
+            error: 'Could not verify Copilot authentication',
+            details: `${auth.error || 'auth probe failed'}. Run \`copilot\` to log in, or set COPILOT_GITHUB_TOKEN.`,
         };
     }
+    if (!auth.authenticated) {
+        return {
+            ok: false,
+            error: 'Copilot CLI installed but SDK is not authenticated',
+            details: 'Run `copilot` to log in, `gh auth login --scopes copilot`, or set COPILOT_GITHUB_TOKEN (fine-grained PAT).',
+        };
+    }
+
+    const normalizedModel = normalizeCopilotSdkModel(model);
+    const isKnownModel = ALL_COPILOT_SDK_KNOWN_MODELS.includes(normalizedModel);
+    const modelWarning = isKnownModel ? undefined : `Model '${model}' is not in the known working models list and may not work`;
+
+    const authLabel = auth.authType ? `; Auth: ${auth.authType}` : '';
+    return {
+        ok: true,
+        details: version
+            ? `CLI: ${version}${authLabel}; Model: ${model}; Node: ${nodeVersion}`
+            : `Model: ${model}${authLabel}; Node: ${nodeVersion}`,
+        modelWarning,
+    };
 };
 
 /**
@@ -542,15 +661,30 @@ const checkProviderHealth = async (provider: BuiltinService, providerConfig: Raw
     }
 
     if (provider === 'COPILOT_SDK') {
-        if (!hasConfiguredModel(providerConfig)) {
+        // Opt-in is a model OR a key OR COPILOT_GITHUB_TOKEN — the same signal the
+        // runtime uses (issue #254). Gating the skip on the model alone told a user who
+        // opted in with a key or a token that nothing was configured (issue #268).
+        if (!hasCopilotSdkAvailable(providerConfig)) {
             return {
                 provider,
                 status: 'skipped',
-                message: 'No models configured',
+                message: 'Not configured (needs model, key, or COPILOT_GITHUB_TOKEN)',
             };
         }
 
-        const result = checkCopilotSdkEnvironment(providerConfig);
+        // Opted in, but the request fan-out is one request per configured model
+        // (ai-request.manager.ts), so an empty model list sends nothing. The provider is
+        // selected and still produces no suggestions — a warning, not healthy.
+        if (getConfiguredModels(providerConfig).length === 0) {
+            return {
+                provider,
+                status: 'warning',
+                message: 'Opted in but no model configured — no requests will be sent',
+                details: 'Set COPILOT_SDK.model (e.g. gpt-4.1)',
+            };
+        }
+
+        const result = await checkCopilotSdkEnvironment(providerConfig, timeout);
         if (!result.ok) {
             return {
                 provider,
@@ -560,11 +694,48 @@ const checkProviderHealth = async (provider: BuiltinService, providerConfig: Raw
             };
         }
 
+        // Model warning is shown in `aicommit2 doctor` stdout alongside other provider health checks.
+        if (result.modelWarning) {
+            return {
+                provider,
+                status: 'warning',
+                message: result.modelWarning,
+                details: result.details,
+            };
+        }
+
         return {
             provider,
             status: 'healthy',
             message: 'SDK environment ready',
             details: result.details,
+        };
+    }
+
+    // Subscription-CLI providers authenticate through their own CLI and never carry a
+    // key, so a configured model is the opt-in signal (issue #254, mirrors the runtime
+    // gate in get-available-ais.ts). Without this branch they fall through to the API
+    // key check below and always report "Not configured", even while generation works
+    // (issue #268). COPILOT_SDK is a member of the set too but returns from its own branch
+    // above, so it never reaches here — the COPILOT_GITHUB_TOKEN test in tests/specs/doctor.ts
+    // pins that ordering, since reaching this gate would report it as having no models.
+    // Any future member lands on this model gate by default.
+    if (SUBSCRIPTION_CLI_SERVICES.includes(provider)) {
+        const models = getConfiguredModels(providerConfig);
+
+        if (models.length === 0) {
+            return {
+                provider,
+                status: 'skipped',
+                message: 'No models configured',
+            };
+        }
+
+        return {
+            provider,
+            status: 'healthy',
+            message: 'Model configured',
+            details: `Model: ${models.join(', ')}`,
         };
     }
 
@@ -620,6 +791,84 @@ export const runHealthChecks = async (config: ValidConfig): Promise<ProviderHeal
     return results;
 };
 
+/**
+ * Check lazygit integration status
+ */
+export const checkLazygitIntegration = (): ProviderHealthResult => {
+    if (!isLazygitInstalled()) {
+        return {
+            provider: 'LAZYGIT',
+            status: 'skipped',
+            message: 'lazygit not installed',
+        };
+    }
+
+    const location = findLazygitConfig();
+    if (!location.exists) {
+        return {
+            provider: 'LAZYGIT',
+            status: 'warning',
+            message: 'No lazygit config found',
+            details: 'Run `aicommit2 setup lazygit` to configure',
+        };
+    }
+
+    if (!hasAicommitIntegration(location.path)) {
+        return {
+            provider: 'LAZYGIT',
+            status: 'warning',
+            message: 'Integration not configured',
+            details: 'Run `aicommit2 setup lazygit` to configure',
+        };
+    }
+
+    return {
+        provider: 'LAZYGIT',
+        status: 'healthy',
+        message: 'Integration configured',
+        details: location.path,
+    };
+};
+
+/**
+ * Compare the running build against the npm registry. Network trouble and development
+ * builds are reported as skipped so the rest of the health check is unaffected.
+ * `fetchLatest` is injectable so every branch can be exercised without the registry.
+ */
+export const checkVersion = async (
+    currentVersion: string = installedVersion,
+    fetchLatest: () => Promise<string> = fetchLatestVersion
+): Promise<ProviderHealthResult> => {
+    const versionResult = (status: HealthStatus, message: string, details?: string): ProviderHealthResult => ({
+        provider: 'VERSION',
+        status,
+        message,
+        details,
+    });
+
+    if (!isReleaseVersion(currentVersion)) {
+        return versionResult('skipped', 'Development build, version check skipped', currentVersion);
+    }
+
+    let latestVersion: string;
+    try {
+        latestVersion = await fetchLatest();
+    } catch {
+        return versionResult('skipped', 'Could not reach the npm registry', `installed v${currentVersion}`);
+    }
+
+    if (compareVersions(currentVersion, latestVersion) === 'outdated') {
+        const installSource = detectInstallSource(resolveInstalledBinPath());
+        return versionResult(
+            'warning',
+            `Update available: v${currentVersion} → v${latestVersion}`,
+            `Run \`${UPGRADE_COMMANDS[installSource]}\``
+        );
+    }
+
+    return versionResult('healthy', `Up to date (v${currentVersion})`);
+};
+
 // Pre-calculate max provider name length for consistent formatting
 const MAX_PROVIDER_LENGTH = Math.max(...BUILTIN_SERVICES.map(s => s.length));
 
@@ -628,27 +877,40 @@ const formatProviderName = (name: string): string => name.padEnd(MAX_PROVIDER_LE
 /**
  * Print health check results to console
  */
-const printResults = (results: ProviderHealthResult[]): void => {
+interface ResultSection {
+    title: string;
+    results: ProviderHealthResult[];
+}
+
+const printResults = (sections: ResultSection[]): void => {
     console.log('');
     console.log(chalk.bold('🩺 aicommit2 Health Check'));
-    console.log('');
-    console.log(chalk.bold('Providers:'));
 
-    for (const result of results) {
+    const printResultLine = (result: ProviderHealthResult) => {
         const icon = STATUS_ICONS[result.status];
         const name = formatProviderName(result.provider);
         const message = STATUS_LABELS[result.status](result.message);
         const details = result.details ? chalk.gray(` (${result.details})`) : '';
 
         console.log(`  ${icon} ${name}  ${message}${details}`);
+    };
+
+    for (const section of sections) {
+        if (section.results.length === 0) {
+            continue;
+        }
+        console.log('');
+        console.log(chalk.bold(`${section.title}:`));
+        section.results.forEach(printResultLine);
     }
 
     // Summary
+    const allResults = sections.flatMap(section => section.results);
     const counts = {
-        healthy: results.filter(r => r.status === 'healthy').length,
-        error: results.filter(r => r.status === 'error').length,
-        warning: results.filter(r => r.status === 'warning').length,
-        skipped: results.filter(r => r.status === 'skipped').length,
+        healthy: allResults.filter(r => r.status === 'healthy').length,
+        error: allResults.filter(r => r.status === 'error').length,
+        warning: allResults.filter(r => r.status === 'warning').length,
+        skipped: allResults.filter(r => r.status === 'skipped').length,
     };
 
     console.log('');
@@ -685,8 +947,13 @@ export const doctorCommand = command(
     () => {
         (async () => {
             const config = await getConfig({}, []);
-            const results = await runHealthChecks(config);
-            printResults(results);
+            // The registry lookup runs alongside the provider checks so its timeout is not additive
+            const [results, versionResult] = await Promise.all([runHealthChecks(config), checkVersion()]);
+            printResults([
+                { title: 'Providers', results },
+                { title: 'Integrations', results: [checkLazygitIntegration()] },
+                { title: 'Installation', results: [versionResult] },
+            ]);
         })().catch(error => {
             console.error(chalk.red(error.message));
             handleCliError(error);

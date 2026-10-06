@@ -1,0 +1,349 @@
+import crypto from 'crypto';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
+import { command } from 'cleye';
+import { execa } from 'execa';
+import inquirer from 'inquirer';
+import { ReactiveListChoice } from 'inquirer-reactive-list-prompt';
+
+import { getAvailableAIs } from './get-available-ais.js';
+import { selectMessageAutomatically } from './select-message.js';
+import { AIRequestManager } from '../managers/ai-request.manager.js';
+import { ConsoleManager } from '../managers/console.manager.js';
+import { ReactivePromptManager, commitMsgLoader } from '../managers/reactive-prompt.manager.js';
+import { getConfig } from '../utils/config.js';
+import { ErrorCode, ErrorMessages } from '../utils/error-messages.js';
+import { KnownError, handleCliError } from '../utils/error.js';
+import { initializeLogger } from '../utils/logger.js';
+import {
+    MessageFlagValues,
+    buildMessageConfigOverrides,
+    forceMessageFlagsOnProviders,
+    sharedMessageFlags,
+} from '../utils/message-flags.js';
+import { validateSystemPrompt } from '../utils/prompt.js';
+import {
+    applyDiffCompression,
+    assertGitRepo,
+    getBranchName,
+    getCommitDiff,
+    getCommitMessage,
+    getRecentCommits,
+    getVCSName,
+    isCommitPushed,
+    rewriteCommit as vcsRewriteCommit,
+} from '../utils/vcs.js';
+
+import type { Subscription } from 'rxjs';
+
+const consoleManager = new ConsoleManager();
+
+export default command(
+    {
+        name: 'rewrite',
+        parameters: ['[commit-hash]'],
+        help: {
+            description: 'Rewrite the commit message of a commit using AI (defaults to HEAD)',
+            examples: ['aicommit2 rewrite', 'aicommit2 rewrite -g 3', 'aicommit2 rewrite abc1234', 'aicommit2 rewrite HEAD~2 --dry-run'],
+        },
+        flags: {
+            ...sharedMessageFlags,
+            confirm: {
+                type: Boolean,
+                description: 'Skip confirmation when rewriting after message generation (default: false)',
+                alias: 'y',
+                default: false,
+            },
+            'dry-run': {
+                type: Boolean,
+                description: 'Generate commit message without rewriting (output only)',
+                alias: 'd',
+                default: false,
+            },
+        },
+    },
+    argv => {
+        (async () => {
+            consoleManager.printTitle();
+
+            // Detect repository
+            const initSpinner = consoleManager.displaySpinner('Detecting repository...');
+            await assertGitRepo();
+
+            // Verify we're in a Git repo (rewrite only supported for Git)
+            const vcsName = await getVCSName();
+            if (vcsName !== 'git') {
+                throw new KnownError(
+                    `Rewrite is only supported for Git repositories. Current VCS: ${vcsName}.\n\n` +
+                        'For Jujutsu, use: jj describe -m "new message"\n' +
+                        'For YADM, use: yadm commit --amend -m "new message"'
+                );
+            }
+
+            // Resolve commit hash (default to HEAD)
+            const commitHash: string = argv._.commitHash || 'HEAD';
+
+            // Validate commit hash if not HEAD
+            if (commitHash !== 'HEAD') {
+                initSpinner.text = 'Validating commit reference...';
+                try {
+                    await execa('git', ['rev-parse', '--verify', `${commitHash}^{commit}`]);
+                } catch {
+                    throw new KnownError(
+                        `Invalid commit reference: ${commitHash}.\n\n` +
+                            'Provide a valid commit hash, branch name, or relative reference (e.g., HEAD~2).'
+                    );
+                }
+            }
+
+            initSpinner.text = 'Loading configuration...';
+
+            const messageFlags: MessageFlagValues = {
+                locale: argv.flags.locale,
+                generate: argv.flags.generate,
+                type: argv.flags.type,
+                prompt: argv.flags.prompt,
+                includeBody: argv.flags['include-body'],
+                disableLowerCase: argv.flags['disable-lowercase'],
+                verbose: argv.flags.verbose,
+            };
+
+            const config = await getConfig(buildMessageConfigOverrides(messageFlags), []);
+
+            await initializeLogger(config);
+
+            forceMessageFlagsOnProviders(config, messageFlags);
+
+            await validateSystemPrompt(config);
+
+            // Get the target commit's diff and current message
+            initSpinner.text = 'Reading commit information...';
+            const commitDiff = await getCommitDiff(commitHash);
+            initSpinner.stop();
+
+            if (!commitDiff) {
+                throw new KnownError(
+                    `Could not retrieve the diff for commit ${commitHash}.\n\n` +
+                        'Make sure the commit hash is correct and the commit exists.',
+                    { code: ErrorCode.VCS_NOT_FOUND }
+                );
+            }
+
+            const currentMessage = await getCommitMessage(commitHash);
+            if (!currentMessage) {
+                throw new KnownError(
+                    `Could not retrieve the commit message for ${commitHash}.\n\n` +
+                        'Make sure the commit hash is correct and the commit exists.'
+                );
+            }
+
+            // Show current message and diff summary
+            const isHead = commitHash === 'HEAD';
+            consoleManager.printInfo(`${isHead ? 'Current' : `Commit ${commitHash}`} commit message:\n  ${currentMessage}\n`);
+            const preview = applyDiffCompression(commitDiff, {
+                mode: config.diffCompression,
+                maxHunkLines: config.maxHunkLines,
+                maxDiffLines: config.maxDiffLines,
+            });
+            consoleManager.printStagedFiles(commitDiff, preview.compression);
+
+            // Get available AIs for commit message generation
+            const availableAIs = getAvailableAIs(config, 'commit');
+            if (availableAIs.length === 0) {
+                throw new KnownError(ErrorMessages.noApiKeysConfigured(), {
+                    code: ErrorCode.MISSING_API_KEY,
+                });
+            }
+
+            const branchName = await getBranchName();
+            // Exclude the target commit from "recent commits" context so the AI doesn't
+            // see the old message it's being asked to replace and unconsciously mirror it.
+            const recentCommits = await getRecentCommits(5, commitHash);
+            const aiRequestManager = new AIRequestManager(config, commitDiff, branchName, recentCommits);
+
+            const autoSelect = argv.flags['auto-select'] || false;
+            const edit = argv.flags.edit || false;
+            const confirm = argv.flags.confirm || false;
+            const dryRun = argv.flags['dry-run'] || false;
+
+            // Generate and select new commit message
+            const commitMsgPromptManager = new ReactivePromptManager(commitMsgLoader);
+            let commitMsgSubscription: Subscription | null = null;
+
+            try {
+                let selectedValue: string | undefined;
+
+                if (autoSelect) {
+                    selectedValue = (await selectMessageAutomatically(aiRequestManager, availableAIs, commitMsgPromptManager)).value;
+                } else {
+                    // Progress shown next to the bar as (done/total): final results (including
+                    // error entries) over the number of AI requests. Streaming previews excluded.
+                    const totalRequests = aiRequestManager.countRequests(availableAIs);
+                    let settledRequests = 0;
+
+                    // Mount up front: the library's loading bar hides the question while the list
+                    // is empty, so there is no premature question + empty list. The bar animates
+                    // through generation and the list fills in as messages stream.
+                    const commitMsgInquirer = commitMsgPromptManager.initPrompt();
+                    // Single emission: carries both `isLoading: true` and the initial (0/N) progress.
+                    commitMsgPromptManager.updateLoaderProgress(settledRequests, totalRequests);
+
+                    commitMsgSubscription = aiRequestManager.createCommitMsgRequests$(availableAIs).subscribe({
+                        next: (choice: ReactiveListChoice) => {
+                            const isFinalResult = !('streamKey' in choice);
+                            if (isFinalResult && settledRequests < totalRequests) {
+                                settledRequests++;
+                                commitMsgPromptManager.updateLoaderProgress(settledRequests, totalRequests);
+                            }
+                            commitMsgPromptManager.refreshChoices(choice);
+                        },
+                        error: error => {
+                            console.error('Commit message generation error:', error);
+                            commitMsgPromptManager.checkErrorOnChoices();
+                        },
+                        complete: () => commitMsgPromptManager.checkErrorOnChoices(),
+                    });
+
+                    const commitMsgInquirerResult = await commitMsgInquirer;
+                    selectedValue = commitMsgInquirerResult.aicommit2Prompt?.value;
+                }
+
+                if (!selectedValue) {
+                    throw new KnownError('An error occurred! No selected message');
+                }
+
+                let selectedMessage = selectedValue;
+
+                if (edit) {
+                    consoleManager.printInfo('Opening editor to modify commit message...');
+                    selectedMessage = await openEditor(selectedMessage);
+
+                    if (!selectedMessage.trim()) {
+                        throw new KnownError(ErrorMessages.emptyCommitMessage(), {
+                            code: ErrorCode.EMPTY_COMMIT_MESSAGE,
+                        });
+                    }
+
+                    consoleManager.printSuccess('Commit message edited successfully!');
+                    consoleManager.print(`\n${selectedMessage}\n`);
+                }
+
+                // Dry run: output only, don't rewrite. Fall through to finally for cleanup.
+                if (dryRun) {
+                    process.stdout.write(selectedMessage + '\n');
+                    return;
+                }
+
+                // Auto-select or confirm — skip the explicit confirm prompt below
+                if (confirm || autoSelect) {
+                    await performRewrite(selectedMessage, commitHash);
+                    return;
+                }
+
+                const { confirmationPrompt } = await inquirer.prompt([
+                    {
+                        type: 'confirm',
+                        name: 'confirmationPrompt',
+                        message: `Use selected message?`,
+                        default: true,
+                    },
+                ]);
+
+                if (confirmationPrompt) {
+                    await performRewrite(selectedMessage, commitHash);
+                } else {
+                    consoleManager.printCancelledCommit();
+                }
+            } finally {
+                // Runs on every exit path (return, throw) so subscriptions don't leak. The
+                // assignment lives inside the Promise executor, which control-flow analysis
+                // can't see, so re-assert the declared type before the null-guarded call.
+                (commitMsgSubscription as Subscription | null)?.unsubscribe();
+                commitMsgPromptManager.destroy();
+            }
+        })().catch(error => {
+            consoleManager.printError(error.message);
+            handleCliError(error);
+            process.exit(1);
+        });
+    }
+);
+
+/**
+ * Rewrite the commit message, warning the user if the commit is already pushed.
+ * Returns without rewriting if the user cancels at the push warning.
+ */
+async function performRewrite(message: string, commitHash: string): Promise<void> {
+    const pushed = await isCommitPushed(commitHash);
+    if (pushed) {
+        const isHead = commitHash === 'HEAD';
+        consoleManager.printWarning(
+            `${isHead ? 'The HEAD' : `Commit ${commitHash.slice(0, 7)}`} appears to have been pushed to the remote.\n` +
+                '   Rewriting will change its hash. You will need to force push:\n' +
+                '     git push --force-with-lease'
+        );
+
+        const { proceed } = await inquirer.prompt([
+            {
+                type: 'confirm',
+                name: 'proceed',
+                message: 'Continue with rewrite anyway?',
+                default: false,
+            },
+        ]);
+
+        if (!proceed) {
+            consoleManager.printCancelledCommit();
+            return;
+        }
+    }
+
+    await vcsRewriteCommit(message, commitHash);
+    consoleManager.printSuccess('Commit message rewritten successfully!');
+}
+
+/**
+ * Open the commit message in the user's default editor for editing.
+ */
+async function openEditor(message: string): Promise<string> {
+    const editor = process.env.VISUAL || process.env.EDITOR || (process.platform === 'win32' ? 'notepad' : 'vi');
+    const tempFile = path.join(os.tmpdir(), `aicommit2-rewrite-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.txt`);
+
+    try {
+        fs.writeFileSync(tempFile, message, 'utf8');
+
+        const editorParts = editor.split(' ');
+        const [binary, ...flags] = editorParts;
+
+        await execa(binary, [...flags, tempFile], { stdio: 'inherit' });
+
+        const editedMessage = fs.readFileSync(tempFile, 'utf8').trim();
+        fs.unlinkSync(tempFile);
+
+        if (!editedMessage) {
+            throw new KnownError('Rewrite cancelled - empty message');
+        }
+
+        return editedMessage;
+    } catch (error) {
+        try {
+            fs.unlinkSync(tempFile);
+        } catch {
+            // Already removed or never created
+        }
+
+        if (error instanceof KnownError) {
+            throw error;
+        }
+
+        if (error && typeof error === 'object' && 'exitCode' in error) {
+            if ((error as any).exitCode !== 0) {
+                throw new KnownError('Rewrite cancelled');
+            }
+        }
+
+        throw new KnownError(`Failed to open editor "${editor}". Please set your EDITOR or VISUAL environment variable.`);
+    }
+}

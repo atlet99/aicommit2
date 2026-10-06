@@ -1,6 +1,7 @@
 import { command } from 'cleye';
 import inquirer from 'inquirer';
 
+import { LazygitSetupMode, runLazygitSetup } from './setup-lazygit.js';
 import { ConsoleManager } from '../managers/console.manager.js';
 import { BUILTIN_SERVICES, DEFAULT_OLLAMA_HOST, setConfigs } from '../utils/config.js';
 import { handleCliError } from '../utils/error.js';
@@ -65,7 +66,7 @@ const PROVIDER_INFO: Record<string, ProviderInfo> = {
         displayName: 'DeepSeek',
         authType: 'api-key',
         envKeyHint: 'DEEPSEEK_API_KEY',
-        defaultModel: 'deepseek-chat',
+        defaultModel: 'deepseek-v4-flash',
     },
     MISTRAL: {
         displayName: 'Mistral AI',
@@ -117,14 +118,43 @@ const POPULAR_PROVIDERS = ['OPENAI', 'OPENROUTER', 'ANTHROPIC', 'GEMINI', 'OLLAM
 export default command(
     {
         name: 'setup',
-        parameters: [],
+        parameters: ['[integration]'],
+        flags: {
+            mode: {
+                type: String,
+                description: 'Integration mode for lazygit setup (simple|fzf)',
+                default: 'simple',
+            },
+            key: {
+                type: String,
+                description: 'lazygit keybinding for the custom command (default: c for simple, C for fzf)',
+            },
+            force: {
+                type: Boolean,
+                description: 'Overwrite an existing aicommit2 integration',
+                default: false,
+            },
+        },
         help: {
-            description: 'Interactive setup wizard for configuring AI providers',
-            examples: ['aic2 setup'],
+            description: 'Interactive setup wizard for configuring AI providers, or set up integrations',
+            examples: ['aic2 setup', 'aic2 setup lazygit', 'aic2 setup lazygit --mode fzf'],
         },
     },
     argv => {
         (async () => {
+            const integration = argv._.integration;
+            if (integration) {
+                if (integration !== 'lazygit') {
+                    throw new Error(`Unknown integration: ${integration}. Supported integrations: lazygit`);
+                }
+                await runLazygitSetup({
+                    mode: argv.flags.mode as LazygitSetupMode,
+                    key: argv.flags.key,
+                    force: argv.flags.force,
+                });
+                return;
+            }
+
             consoleManager.printTitle();
             console.log();
             consoleManager.printInfo("Welcome to aicommit2 setup! Let's configure your AI providers.\n");

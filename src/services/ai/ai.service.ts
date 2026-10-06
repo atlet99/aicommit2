@@ -1,11 +1,21 @@
 import { ReactiveListChoice } from 'inquirer-reactive-list-prompt';
 import { Observable, Subject, catchError, of } from 'rxjs';
 
+import { StreamableChoice } from '../../managers/reactive-prompt.manager.js';
 import { addLogEntry } from '../../utils/ai-log.js';
+import { buildCommitContext } from '../../utils/commit-context/index.js';
 import { CommitType, ModelConfig, ModelName, ModelNameDisplay } from '../../utils/config.js';
 import { ErrorCode, ErrorCodeType, detectErrorCode, getPlainErrorMessage, httpStatusToErrorCode } from '../../utils/error-messages.js';
 import { logger } from '../../utils/logger.js';
-import { DEFAULT_PROMPT_OPTIONS, PromptOptions, generatePrompt } from '../../utils/prompt.js';
+import {
+    CRITICAL_ISSUES_MARKER,
+    CommitContext,
+    DEFAULT_PROMPT_OPTIONS,
+    PromptOptions,
+    generatePrompt,
+    generateUserPrompt,
+} from '../../utils/prompt.js';
+import { isReasoningCapableModel } from '../../utils/reasoning-models.js';
 import { IncrementalJsonParser } from '../../utils/stream-json-parser.js';
 import { getFirstWordsFrom, safeJsonParse } from '../../utils/utils.js';
 import { GitDiff } from '../../utils/vcs.js';
@@ -51,6 +61,8 @@ export interface AIServiceParams {
     statsDays?: number;
     /** How to display model name in service label: none, short, or full */
     modelNameDisplay?: ModelNameDisplay;
+    /** Recent commit messages for style reference */
+    recentCommits?: string;
 }
 
 export interface AIServiceError extends Error {
@@ -398,12 +410,13 @@ export abstract class AIService {
     }
 
     /**
-     * Build the system prompt for commit message generation.
-     * Shared across all streaming service implementations.
+     * Build PromptOptions with auto-detected reasoning model flag.
+     * Services can use this instead of constructing PromptOptions manually.
      */
-    protected buildCommitPrompt = (): string => {
-        const { systemPrompt, systemPromptPath, codeReviewPromptPath, locale, generate, type, maxLength } = this.params.config;
-        const promptOptions: PromptOptions = {
+    protected buildPromptOptions = (): PromptOptions => {
+        const { systemPrompt, systemPromptPath, codeReviewPromptPath, locale, generate, type, maxLength, model } = this.params.config;
+        const modelName = Array.isArray(model) ? model[0] || '' : String(model || '');
+        return {
             ...DEFAULT_PROMPT_OPTIONS,
             locale,
             maxLength,
@@ -413,9 +426,29 @@ export abstract class AIService {
             systemPromptPath,
             codeReviewPromptPath,
             vcs_branch: this.params.branchName || '',
+            isReasoning: isReasoningCapableModel(modelName),
         };
-        return generatePrompt(promptOptions);
     };
+
+    protected buildCommitPrompt = (): string => {
+        return generatePrompt(this.buildPromptOptions());
+    };
+
+    /**
+     * Assemble the enriched commit context (tickets, conventions, branch intent)
+     * from this request's raw VCS signals. Single source for all providers —
+     * services that build prompts outside buildUserPrompt should call this too.
+     */
+    protected getCommitContext = (): CommitContext =>
+        buildCommitContext({
+            recentCommits: this.params.recentCommits,
+            branchName: this.params.branchName,
+            ticketExtraction: this.params.config.ticketExtraction,
+            learnConventions: this.params.config.learnConventions,
+        });
+
+    protected buildUserPrompt = (diff: string, requestType: 'commit' | 'review' = 'commit'): string =>
+        generateUserPrompt(diff, requestType, this.getCommitContext());
 
     /**
      * Format a raw commit message into an AIResponse-like shape (title + full value).
@@ -457,13 +490,17 @@ export abstract class AIService {
     };
 
     protected createStreamingCommitMessages$ = (
-        chunkProducer: (subject: Subject<string>) => void,
+        chunkProducer: (subject: Subject<string>, signal: AbortSignal) => void,
         type: CommitType,
         maxCount: number
     ): Observable<ReactiveListChoice> => {
-        const streamKey = `stream-${this.serviceName}-${Date.now()}`;
+        const streamKey = `stream-${this.serviceName}-${crypto.randomUUID()}`;
 
         return new Observable<ReactiveListChoice>(subscriber => {
+            // Aborted on teardown so an early unsubscribe (user picks a message while
+            // other providers are still streaming) cancels the in-flight request instead
+            // of letting it run to completion into a subscriber-less subject.
+            const controller = new AbortController();
             const parser = new IncrementalJsonParser();
             const subject = new Subject<string>();
             let emittedCount = 0;
@@ -471,9 +508,7 @@ export abstract class AIService {
             let lastPreviewTime = 0;
             const PREVIEW_THROTTLE_MS = 100;
             const STREAMING_LABEL = 'streaming';
-            // ReactiveListChoice.disabled is boolean, but we need streamKey for in-place removal
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const removeSentinel: any = { name: '', value: '', streamKey, disabled: true, isError: false };
+            const removeSentinel: StreamableChoice = { name: '', value: '', streamKey, disabled: true, isError: false };
 
             const emitStreamPreview = (force = false): void => {
                 const now = Date.now();
@@ -490,9 +525,7 @@ export abstract class AIService {
                 const displayName = partialSubject ? `${this.serviceName} ${partialSubject}` : `${this.serviceName} Generating...`;
                 const displayDescription = partialBody || partialSubject || '';
 
-                // ReactiveListChoice lacks streamKey/disabled-as-string; using any to extend shape
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const preview: any = {
+                const preview: StreamableChoice = {
                     name: displayName,
                     short: partialSubject || 'Generating...',
                     value: `__streaming__${streamKey}`,
@@ -562,9 +595,10 @@ export abstract class AIService {
                 },
             });
 
-            chunkProducer(subject);
+            chunkProducer(subject, controller.signal);
 
             return () => {
+                controller.abort();
                 subscription.unsubscribe();
             };
         }).pipe(catchError(this.handleError$));
@@ -653,7 +687,7 @@ export abstract class AIService {
     };
 
     private formatReviewAsMarkdown = (summary: string, items: CodeReviewItem[], hasCritical: boolean): string => {
-        const criticalMarker = hasCritical ? '\n<!-- HAS_CRITICAL_ISSUES -->\n' : '';
+        const criticalMarker = hasCritical ? `\n${CRITICAL_ISSUES_MARKER}\n` : '';
         const lines: string[] = [`## Summary\n${summary}${criticalMarker}\n`];
 
         const severityOrder: CodeReviewSeverity[] = ['critical', 'warning', 'suggestion', 'praise'];

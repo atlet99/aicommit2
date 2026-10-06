@@ -6,38 +6,14 @@ import { filter, lastValueFrom, map, toArray } from 'rxjs';
 import { getAvailableAIs } from './get-available-ais.js';
 import { AIRequestManager } from '../managers/ai-request.manager.js';
 import { ConsoleManager } from '../managers/console.manager.js';
-import { RawConfig, getConfig } from '../utils/config.js';
+import { getConfig } from '../utils/config.js';
 import { KnownError, handleCliError } from '../utils/error.js';
-import { getBranchName, getCommentChar, getStagedDiff } from '../utils/vcs.js';
+import { initializeLogger, logger } from '../utils/logger.js';
+import { MessageFlagValues, buildMessageConfigOverrides, forceMessageFlagsOnProviders } from '../utils/message-flags.js';
+import { parseHookPositionalArgs } from '../utils/parse-hook-args.js';
+import { getBranchName, getCommentChar, getRecentCommits, getStagedDiff } from '../utils/vcs.js';
 
-const allArgs = process.argv.slice(2);
-const positionalArgs: string[] = [];
-let skipNext = false;
-
-for (let i = 0; i < allArgs.length; i++) {
-    const arg = allArgs[i];
-
-    if (skipNext) {
-        skipNext = false;
-        continue;
-    }
-
-    if (arg === '--hook-mode') {
-        continue;
-    }
-
-    if (arg.startsWith('-')) {
-        const nextArg = allArgs[i + 1];
-        if (nextArg && !nextArg.startsWith('-')) {
-            skipNext = true;
-        }
-        continue;
-    }
-
-    positionalArgs.push(arg);
-}
-
-const [messageFilePath, commitSource] = positionalArgs;
+const [messageFilePath, commitSource] = parseHookPositionalArgs(process.argv.slice(2), ['--hook-mode']);
 
 export default (
     locale: string | undefined,
@@ -61,28 +37,12 @@ export default (
             return;
         }
 
-        // All staged files can be ignored by our filter
-        const staged = await getStagedDiff();
-        if (!staged) {
-            return;
-        }
+        const messageFlags: MessageFlagValues = { locale, generate, type: commitType, prompt, includeBody, verbose };
 
-        const consoleManager = new ConsoleManager();
-        consoleManager.printTitle();
-
-        const configOverrides: RawConfig = {
-            locale: locale?.toString() as string,
-            generate: generate?.toString() as string,
-            type: commitType?.toString() as string,
-            systemPrompt: prompt?.toString() as string,
-            ...(includeBody === true && { includeBody: 'true' }),
-        };
-
-        if (verbose) {
-            configOverrides.logLevel = 'verbose';
-        }
-
-        const config = await getConfig(configOverrides, excludeFiles);
+        const config = await getConfig(buildMessageConfigOverrides(messageFlags));
+        await initializeLogger(config);
+        forceMessageFlagsOnProviders(config, messageFlags);
+        logger.verbose(`[hook-mode] type=${config.type}, systemPrompt=${config.systemPrompt ? 'set' : 'empty'}`);
         if (config.systemPromptPath) {
             try {
                 await fs.readFile(path.resolve(config.systemPromptPath), 'utf-8');
@@ -91,6 +51,15 @@ export default (
             }
         }
 
+        // All staged files can be ignored by our filter
+        const staged = await getStagedDiff(excludeFiles, config.exclude);
+        if (!staged) {
+            return;
+        }
+
+        const consoleManager = new ConsoleManager();
+        consoleManager.printTitle();
+
         const availableAIs = getAvailableAIs(config, 'commit');
         const hasNoAvailableAIs = availableAIs.length === 0;
         if (hasNoAvailableAIs) {
@@ -98,7 +67,8 @@ export default (
         }
 
         const branchName = await getBranchName();
-        const aiRequestManager = new AIRequestManager(config, staged, branchName);
+        const recentCommits = await getRecentCommits();
+        const aiRequestManager = new AIRequestManager(config, staged, branchName, recentCommits);
         const spinner = consoleManager.displaySpinner('The AI is analyzing your changes');
         let messages: string[];
         try {
@@ -144,11 +114,21 @@ export default (
             instructions += `${commentChar} ----------------------------------------\n`;
         }
 
-        if (hasMultipleMessages) {
-            if (supportsComments) {
-                instructions += `\n${commentChar} 📝 Choose one of these messages:\n`;
-            }
-            instructions += `\n${messages.map(message => `${commentChar} ${message}`).join('\n')}`;
+        if (hasMultipleMessages && supportsComments) {
+            instructions += `\n${commentChar} 📝 Choose one of these messages:\n`;
+            // Prefix every line of each message (not just the first), otherwise body/footer
+            // lines stay uncommented and git treats them as the actual commit body.
+            instructions += `\n${messages
+                .map(message =>
+                    message
+                        .split('\n')
+                        .map(line => `${commentChar} ${line}`)
+                        .join('\n')
+                )
+                .join(`\n${commentChar}\n`)}`;
+        } else if (hasMultipleMessages) {
+            // --no-edit: no editor to pick from, so auto-select the first message.
+            instructions += `\n${messages[0]}\n`;
         } else {
             if (supportsComments) {
                 instructions += `\n${commentChar} 📝 Generated commit message:\n`;

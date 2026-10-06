@@ -11,18 +11,19 @@ export class AIRequestManager {
     constructor(
         private readonly config: ValidConfig,
         private readonly stagedDiff: GitDiff,
-        private readonly branchName: string = ''
+        private readonly branchName: string = '',
+        private readonly recentCommits: string = ''
     ) {}
 
     /**
-     * Apply per-model diff compression based on model config.
-     * Falls back to raw diff if model has no compression settings.
+     * Apply per-model diff compression based on model config. The parser always fills
+     * these three fields (mode defaults to `auto`, caps to 0), so no fallbacks here.
      */
     private getDiffForModel = (modelConfig: ValidConfig[ModelName]): GitDiff => {
         const compressionConfig: DiffCompressionConfig = {
-            mode: modelConfig.diffCompression || 'none',
-            maxHunkLines: modelConfig.maxHunkLines || 0,
-            maxDiffLines: modelConfig.maxDiffLines || 0,
+            mode: modelConfig.diffCompression,
+            maxHunkLines: modelConfig.maxHunkLines,
+            maxDiffLines: modelConfig.maxDiffLines,
         };
         return applyDiffCompression(this.stagedDiff, compressionConfig);
     };
@@ -49,6 +50,23 @@ export class AIRequestManager {
         return this.createServiceRequests$(modelNames, 'review');
     };
 
+    /**
+     * Number of requests the given providers will fan out to. Each provider fires one
+     * request per configured model, so this is not the same as the provider count.
+     */
+    countRequests = (modelNames: ModelName[]): number => {
+        return modelNames.reduce((total, ai) => total + this.getModels(ai).length, 0);
+    };
+
+    /**
+     * Models a provider is configured with. Single source for the fan-out width, so the
+     * progress counter and the requests themselves cannot drift apart.
+     */
+    private getModels = (ai: ModelName): string[] => {
+        const { model } = this.config[ai];
+        return Array.isArray(model) ? model : [model];
+    };
+
     private createServiceRequests$ = (modelNames: ModelName[], requestType: 'commit' | 'review'): Observable<ReactiveListChoice> => {
         return from(modelNames).pipe(
             mergeMap(ai => this.createProviderRequests$(ai, requestType)),
@@ -57,10 +75,7 @@ export class AIRequestManager {
     };
 
     private createProviderRequests$ = (ai: ModelName, requestType: 'commit' | 'review'): Observable<ReactiveListChoice> => {
-        const config = this.config[ai];
-        const models = Array.isArray(config.model) ? config.model : [config.model];
-
-        return from(models).pipe(mergeMap(model => this.createModelRequest$(ai, model, requestType)));
+        return from(this.getModels(ai)).pipe(mergeMap(model => this.createModelRequest$(ai, model, requestType)));
     };
 
     private createModelRequest$ = (ai: ModelName, model: string, requestType: 'commit' | 'review'): Observable<ReactiveListChoice> => {
@@ -80,6 +95,7 @@ export class AIRequestManager {
                 stagedDiff: modelDiff,
                 keyName: model as ModelName,
                 branchName: this.branchName,
+                recentCommits: this.recentCommits,
                 statsEnabled: this.config.useStats,
                 statsDays: this.config.statsDays,
                 modelNameDisplay: this.config.modelNameDisplay,
@@ -110,6 +126,7 @@ export class AIRequestManager {
                     stagedDiff: modelDiff,
                     keyName: model as ModelName,
                     branchName: this.branchName,
+                    recentCommits: this.recentCommits,
                     modelNameDisplay: this.config.modelNameDisplay,
                 });
 

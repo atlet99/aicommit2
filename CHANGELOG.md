@@ -1,3 +1,169 @@
+# [2.12.0](https://github.com/tak-bro/aicommit2/compare/v2.11.1...v2.12.0) (2026-09-14)
+
+
+### Features
+
+* worktree hook install, auto diff compression, doctor version check, rewrite --include-body ([60eb351](https://github.com/tak-bro/aicommit2/commit/60eb3511438ca2a6f189874d0baad0159b7134cb)), closes [#271](https://github.com/tak-bro/aicommit2/issues/271) [#262](https://github.com/tak-bro/aicommit2/issues/262) [#271](https://github.com/tak-bro/aicommit2/issues/271)
+
+## [2.11.1](https://github.com/tak-bro/aicommit2/compare/v2.11.0...v2.11.1) (2026-08-15)
+
+
+### Bug Fixes
+
+* **doctor:** report subscription-CLI providers by their opt-in signal ([bfb1ab3](https://github.com/tak-bro/aicommit2/commit/bfb1ab359c45fc5d0e7fa54a82d723d08a3f4d8c)), closes [#268](https://github.com/tak-bro/aicommit2/issues/268)
+* **doctor:** warn instead of healthy when COPILOT_SDK has no model ([864aebc](https://github.com/tak-bro/aicommit2/commit/864aebc4c2d002cfa5feba1fa77dd8b517ba3159)), closes [#268](https://github.com/tak-bro/aicommit2/issues/268)
+
+# [2.11.0](https://github.com/tak-bro/aicommit2/compare/v2.10.0...v2.11.0) (2026-08-10)
+
+
+### Bug Fixes
+
+* **auto-select:** skip the code review picker with --auto-select ([2434213](https://github.com/tak-bro/aicommit2/commit/243421348b07aa0c8c202732c559d08e012c5962))
+
+
+### Features
+
+* **config:** suggest several options and link the docs on invalid config ([45d3f3e](https://github.com/tak-bro/aicommit2/commit/45d3f3e0385c7e5689e57055c2d960d3bdf51318))
+
+# [2.10.0](https://github.com/tak-bro/aicommit2/compare/v2.9.0...v2.10.0) (2026-08-03)
+
+
+### Bug Fixes
+
+* make --auto-select work with multiple AI providers ([#262](https://github.com/tak-bro/aicommit2/issues/262)) ([34b8d66](https://github.com/tak-bro/aicommit2/commit/34b8d669ef1947754afc9793d5bf0788e540cc07))
+
+
+### Features
+
+* add `aicommit2 config validate` ([#263](https://github.com/tak-bro/aicommit2/issues/263)) ([91cee8e](https://github.com/tak-bro/aicommit2/commit/91cee8e5803730b5b127eb4a644a7024a7e4cc5a))
+
+# [2.9.0](https://github.com/tak-bro/aicommit2/compare/v2.8.0...v2.9.0) (2026-07-27)
+
+
+### Bug Fixes
+
+* **copilot-sdk:** upgrade SDK to 1.0.x so the bundled CLI resolves ([#259](https://github.com/tak-bro/aicommit2/issues/259)) ([ffff1d9](https://github.com/tak-bro/aicommit2/commit/ffff1d9e3509a16734e95b98d46899f5cdd1d26c))
+* defer the interactive prompt until the first message so loading shows only a spinner ([#258](https://github.com/tak-bro/aicommit2/issues/258)) ([b7282b7](https://github.com/tak-bro/aicommit2/commit/b7282b738947d7031b1ed4725359b88c23535442))
+* **gemini:** pass the non-streaming timeout as flat SingleRequestOptions ([8b686d4](https://github.com/tak-bro/aicommit2/commit/8b686d4c5d26b23eb5800063a5d2f5e05ca16f2f))
+
+
+### Features
+
+* show an animated loading bar with request progress during generation ([#258](https://github.com/tak-bro/aicommit2/issues/258)) ([b65e7af](https://github.com/tak-bro/aicommit2/commit/b65e7afca243da7e85956ef5eb61f224820b6c94))
+
+
+### Performance Improvements
+
+* abort in-flight AI streams on early unsubscribe ([02fadb9](https://github.com/tak-bro/aicommit2/commit/02fadb9c7f351167d3eca0c4c692c44f57b7b1d3))
+* abort in-flight Gemini streams on early unsubscribe ([ee5acdc](https://github.com/tak-bro/aicommit2/commit/ee5acdc5321c2d0b394750ea6af76cf9ab189a0c))
+* abort in-flight Ollama streams on early unsubscribe ([301e01d](https://github.com/tak-bro/aicommit2/commit/301e01daf50787773e31efbbcfc7307afe54b03e))
+
+# [2.8.0](https://github.com/tak-bro/aicommit2/compare/v2.7.0...v2.8.0) (2026-07-10)
+
+
+### Bug Fixes
+
+* **copilot-sdk:** verify real auth in doctor and add gh token fallback ([#259](https://github.com/tak-bro/aicommit2/issues/259)) ([1c60bd6](https://github.com/tak-bro/aicommit2/commit/1c60bd67421dfd9d2b330c3654865a1ac6b0554f))
+
+
+### Features
+
+* add Gemini CLI provider ([c1bcb31](https://github.com/tak-bro/aicommit2/commit/c1bcb311e262e5c5cce6bdd704cc71b39b413433)), closes [#254](https://github.com/tak-bro/aicommit2/issues/254)
+
+# [2.7.0](https://github.com/tak-bro/aicommit2/compare/v2.6.1...v2.7.0) (2026-07-07)
+
+
+### Bug Fixes
+
+* activate COPILOT_SDK on opt-in signal regardless of SDK package ([#256](https://github.com/tak-bro/aicommit2/issues/256)) ([446c4e7](https://github.com/tak-bro/aicommit2/commit/446c4e7f775738d730e5af7a6fb79c7c836914cf)), closes [#254](https://github.com/tak-bro/aicommit2/issues/254)
+
+
+### Features
+
+* add Claude Code CLI provider ([6631adb](https://github.com/tak-bro/aicommit2/commit/6631adb32cd9ccc962ca313afe09ed2aa03d6157)), closes [#254](https://github.com/tak-bro/aicommit2/issues/254)
+* add lazygit integration setup command ([de2fd86](https://github.com/tak-bro/aicommit2/commit/de2fd86adcadf504474eb028160986b83341aaa2))
+
+## [2.6.1](https://github.com/tak-bro/aicommit2/compare/v2.6.0...v2.6.1) (2026-06-12)
+
+
+### Bug Fixes
+
+* require explicit opt-in for Copilot SDK provider ([aa6f0c9](https://github.com/tak-bro/aicommit2/commit/aa6f0c959edf74acfdc76325c8c9371cfd4b3014)), closes [#254](https://github.com/tak-bro/aicommit2/issues/254)
+
+# [2.6.0](https://github.com/tak-bro/aicommit2/compare/v2.5.22...v2.6.0) (2026-06-04)
+
+
+### Features
+
+* enrich commit context with tickets, conventions, and branch intent ([9bfb6b8](https://github.com/tak-bro/aicommit2/commit/9bfb6b869ef67a2fada284f05d76720238279c67))
+
+## [2.5.22](https://github.com/tak-bro/aicommit2/compare/v2.5.21...v2.5.22) (2026-05-31)
+
+
+### Bug Fixes
+
+* **rewrite:** harden non-HEAD rewrite + cross-branch push detection ([b00a0e9](https://github.com/tak-bro/aicommit2/commit/b00a0e91488b501202f5c04ce6e1093193c97520))
+* **rewrite:** reject merge ranges, improve context, fix exit cleanup ([240b0f3](https://github.com/tak-bro/aicommit2/commit/240b0f3a599dc07908f9e6ff634ebb7f1f3f7ff8))
+* **rewrite:** reject root commit explicitly on non-HEAD path ([fc44c86](https://github.com/tak-bro/aicommit2/commit/fc44c861d861d3f4b06cb58cdbafa74c2120ae2d))
+* **rewrite:** replace existsSync+unlinkSync with try/catch in openEditor ([ffcb81d](https://github.com/tak-bro/aicommit2/commit/ffcb81de238371a1f2ef7140a82e4effd74f851c))
+* **rewrite:** restore sh -c wrapper for GIT_EDITOR ([4d2ec93](https://github.com/tak-bro/aicommit2/commit/4d2ec93463209b9b79fbc61ffa2a5160d242a751))
+
+## [2.5.21](https://github.com/tak-bro/aicommit2/compare/v2.5.20...v2.5.21) (2026-05-22)
+
+
+### Features
+
+* **cli:** add rewrite command for commit messages ([c265122](https://github.com/tak-bro/aicommit2/commit/c2651222a1a3968a60c60a634650e6c689717afb))
+
+## [2.5.20](https://github.com/tak-bro/aicommit2/compare/v2.5.19...v2.5.20) (2026-05-15)
+
+
+### Bug Fixes
+
+* **nix:** build and run support fixed for x86-64-linux and aarch64-darwin ([60f6083](https://github.com/tak-bro/aicommit2/commit/60f6083a2bee00396ac62b01ae0507e107dbd283))
+
+## [2.5.19](https://github.com/tak-bro/aicommit2/compare/v2.5.18...v2.5.19) (2026-05-14)
+
+
+### Bug Fixes
+
+* **ci:** simplify system checks ([c27cb78](https://github.com/tak-bro/aicommit2/commit/c27cb787b89f8a214c87e7321e39893859445df5))
+* update nix flake workflow ([59de2e8](https://github.com/tak-bro/aicommit2/commit/59de2e8f18e08761b6bd3942f9acab758fdf9f74))
+
+## [2.5.18](https://github.com/tak-bro/aicommit2/compare/v2.5.17...v2.5.18) (2026-05-09)
+
+## [2.5.17](https://github.com/tak-bro/aicommit2/compare/v2.5.16...v2.5.17) (2026-05-08)
+
+
+### Features
+
+* **deep-seek:** add support for v4 flash and pro models ([8a6fa87](https://github.com/tak-bro/aicommit2/commit/8a6fa871bdefd4fcf50b64d3a9ee8f8392d151a2))
+* **deepseek:** support v4-flash model and thinking mode ([a27a8ea](https://github.com/tak-bro/aicommit2/commit/a27a8ea1093ffbcf06059bfdd8968f1ab343a635))
+
+## [2.5.16](https://github.com/tak-bro/aicommit2/compare/v2.5.15...v2.5.16) (2026-05-01)
+
+
+### Features
+
+* polish Copilot SDK support with tests, model list, and doctor validation ([c31412e](https://github.com/tak-bro/aicommit2/commit/c31412ebe68fe2afda231cb6685ac2648e53a710)), closes [#235](https://github.com/tak-bro/aicommit2/issues/235)
+
+## [2.5.15](https://github.com/tak-bro/aicommit2/compare/v2.5.14...v2.5.15) (2026-04-25)
+
+
+### Bug Fixes
+
+* **hooks:** comment all lines of multi-line commit messages ([8b239a3](https://github.com/tak-bro/aicommit2/commit/8b239a36c5a2ce430f29ce0a9fdec591804cefdb))
+
+## [2.5.14](https://github.com/tak-bro/aicommit2/compare/v2.5.13...v2.5.14) (2026-04-20)
+
+
+### Features
+
+* include recent commits and branch in user prompt ([886a5b4](https://github.com/tak-bro/aicommit2/commit/886a5b4892edfd6af8cfb7b04644a6634d8d9841))
+* update prompt for reasoning model ([fcb3f10](https://github.com/tak-bro/aicommit2/commit/fcb3f10a2cfd33d14d49495c156a5f31a7c5cbeb))
+
+## [2.5.13](https://github.com/tak-bro/aicommit2/compare/v2.5.12...v2.5.13) (2026-04-16)
+
 ## [2.5.12](https://github.com/tak-bro/aicommit2/compare/v2.5.11...v2.5.12) (2026-04-10)
 
 

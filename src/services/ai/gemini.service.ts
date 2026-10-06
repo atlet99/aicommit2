@@ -1,4 +1,4 @@
-import { GenerationConfig, GoogleGenerativeAI, HarmBlockThreshold, HarmCategory } from '@google/generative-ai';
+import { GenerationConfig, GoogleGenerativeAI, HarmBlockThreshold, HarmCategory, SingleRequestOptions } from '@google/generative-ai';
 import chalk from 'chalk';
 import { ReactiveListChoice } from 'inquirer-reactive-list-prompt';
 import { Observable, Subject, catchError, concatMap, from, map } from 'rxjs';
@@ -6,7 +6,7 @@ import { fromPromise } from 'rxjs/internal/observable/innerFrom';
 
 import { AIResponse, AIService, AIServiceError, AIServiceParams } from './ai.service.js';
 import { RequestType, logAIComplete, logAIError, logAIPayload, logAIPrompt, logAIRequest, logAIResponse } from '../../utils/ai-log.js';
-import { DEFAULT_PROMPT_OPTIONS, PromptOptions, codeReviewPrompt, generatePrompt, generateUserPrompt } from '../../utils/prompt.js';
+import { codeReviewPrompt, generatePrompt } from '../../utils/prompt.js';
 
 export class GeminiService extends AIService {
     private genAI: GoogleGenerativeAI;
@@ -82,30 +82,19 @@ export class GeminiService extends AIService {
         const { generate, type } = this.params.config;
 
         return this.createStreamingCommitMessages$(
-            subject => {
-                this.streamChunks(subject).catch(err => subject.error(err));
+            (subject, signal) => {
+                this.streamChunks(subject, signal).catch(err => subject.error(err));
             },
             type,
             generate
         );
     };
 
-    private streamChunks = async (subject: Subject<string>): Promise<void> => {
+    private streamChunks = async (subject: Subject<string>, signal: AbortSignal): Promise<void> => {
         const diff = this.params.stagedDiff.diff;
-        const { systemPrompt, systemPromptPath, codeReviewPromptPath, logging, locale, generate, type, maxLength } = this.params.config;
+        const { logging } = this.params.config;
         const maxTokens = this.params.config.maxTokens;
-        const promptOptions: PromptOptions = {
-            ...DEFAULT_PROMPT_OPTIONS,
-            locale,
-            maxLength,
-            type,
-            generate,
-            systemPrompt,
-            systemPromptPath,
-            codeReviewPromptPath,
-            vcs_branch: this.params.branchName || '',
-        };
-        const generatedSystemPrompt = generatePrompt(promptOptions);
+        const generatedSystemPrompt = generatePrompt(this.buildPromptOptions());
         const generationConfig: GenerationConfig = {
             maxOutputTokens: maxTokens,
             temperature: this.params.config.temperature,
@@ -124,7 +113,7 @@ export class GeminiService extends AIService {
             ],
         });
 
-        const userPrompt = generateUserPrompt(diff, 'commit');
+        const userPrompt = this.buildUserPrompt(diff, 'commit');
 
         const baseUrl = this.params.config.url || 'https://generativelanguage.googleapis.com';
         const url = `${baseUrl}/v1beta/models/${this.params.config.model}:streamGenerateContent`;
@@ -148,7 +137,12 @@ export class GeminiService extends AIService {
         let accumulatedText = '';
 
         try {
-            const generateOptions = this.params.config.timeout > 10000 ? { request: { timeout: this.params.config.timeout } } : undefined;
+            // SingleRequestOptions is flat ({ timeout, signal }); the prior { request: { timeout } }
+            // shape did not match the SDK type and was a no-op.
+            const generateOptions: SingleRequestOptions = { signal };
+            if (this.params.config.timeout > 10000) {
+                generateOptions.timeout = this.params.config.timeout;
+            }
 
             const result = await model.generateContentStream(userPrompt, generateOptions);
 
@@ -174,19 +168,9 @@ export class GeminiService extends AIService {
 
     private async generateMessage(requestType: RequestType): Promise<AIResponse[]> {
         const diff = this.params.stagedDiff.diff;
-        const { systemPrompt, systemPromptPath, logging, locale, codeReviewPromptPath, generate, type, maxLength } = this.params.config;
+        const { logging, generate, type } = this.params.config;
         const maxTokens = this.params.config.maxTokens;
-        const promptOptions: PromptOptions = {
-            ...DEFAULT_PROMPT_OPTIONS,
-            locale,
-            maxLength,
-            type,
-            generate,
-            systemPrompt,
-            systemPromptPath,
-            codeReviewPromptPath,
-            vcs_branch: this.params.branchName || '',
-        };
+        const promptOptions = this.buildPromptOptions();
         const generatedSystemPrompt = requestType === 'review' ? codeReviewPrompt(promptOptions) : generatePrompt(promptOptions);
         const generationConfig: GenerationConfig = {
             maxOutputTokens: maxTokens,
@@ -218,7 +202,7 @@ export class GeminiService extends AIService {
             ],
         });
 
-        const userPrompt = generateUserPrompt(diff, requestType);
+        const userPrompt = this.buildUserPrompt(diff, requestType);
 
         // 상세 로깅 (config URL 사용)
         const baseUrl = this.params.config.url || 'https://generativelanguage.googleapis.com';
@@ -242,7 +226,9 @@ export class GeminiService extends AIService {
         const startTime = Date.now();
 
         try {
-            const generateOptions = this.params.config.timeout > 10000 ? { request: { timeout: this.params.config.timeout } } : undefined;
+            // SingleRequestOptions is flat; { request: { timeout } } did not match the SDK type.
+            const generateOptions: SingleRequestOptions | undefined =
+                this.params.config.timeout > 10000 ? { timeout: this.params.config.timeout } : undefined;
 
             const result = await model.generateContent(userPrompt, generateOptions);
             const response = result.response;

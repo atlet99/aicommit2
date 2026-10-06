@@ -3,6 +3,8 @@ import fs from 'fs';
 import { CommitType, ValidConfig, resolvePromptPath } from './config.js';
 import { KnownError } from './error.js';
 
+import type { BranchIntent, ConventionProfile, TicketRef } from './commit-context/types.js';
+
 export interface PromptOptions {
     locale: string;
     maxLength: number;
@@ -11,8 +13,10 @@ export interface PromptOptions {
     systemPrompt?: string;
     systemPromptPath?: string;
     codeReviewPromptPath?: string;
-    // VCS context placeholder
+    // Branch name, available as {vcs_branch} in custom prompt templates
     vcs_branch?: string;
+    // Whether the target model is a reasoning model (o1, o3, gpt-5, deepseek-reasoner, etc.)
+    isReasoning?: boolean;
 }
 
 export const DEFAULT_PROMPT_OPTIONS: PromptOptions = {
@@ -24,6 +28,7 @@ export const DEFAULT_PROMPT_OPTIONS: PromptOptions = {
     systemPromptPath: '',
     codeReviewPromptPath: '',
     vcs_branch: '',
+    isReasoning: false,
 };
 
 const commitTypeFormats: Record<CommitType, string> = {
@@ -266,6 +271,37 @@ const defaultPrompt = (promptOptions: PromptOptions) => {
         .join('\n');
 };
 
+/**
+ * Prompt optimized for reasoning models (o1, o3, gpt-5, deepseek-reasoner, etc.).
+ * These models perform internal chain-of-thought reasoning, so the prompt is:
+ * - Goal-oriented rather than rule-heavy
+ * - Emphasizes understanding intent (WHY) over surface-level changes (WHAT)
+ * - Fewer constraints to let the model reason freely
+ * - Still enforces output format for parsing
+ */
+const reasoningPrompt = (promptOptions: PromptOptions) => {
+    const { type, maxLength, generate, locale } = promptOptions;
+
+    return [
+        `You are an expert developer writing ${type || ''} commit message${generate !== 1 ? 's' : ''} from a git diff.`,
+        '',
+        `Analyze the diff to understand:`,
+        `1. What is the primary intent of these changes? (new feature, bug fix, refactor, etc.)`,
+        `2. What is the scope? (which module, component, or system is affected?)`,
+        `3. Are there any breaking changes or side effects?`,
+        '',
+        `Language: ${locale}`,
+        `Subject: max ${maxLength} chars, imperative mood, no period`,
+        type ? `Format: ${commitTypeFormats[type]}` : '',
+        type ? `Allowed types:${commitTypes[type]}` : '',
+        '',
+        `Generate exactly ${generate} commit message${generate !== 1 ? 's' : ''}.`,
+        `Prioritize explaining WHY the change was made over describing WHAT changed.`,
+    ]
+        .filter(Boolean)
+        .join('\n');
+};
+
 const finalPrompt = (type: CommitType, generate: number, locale: string) => {
     const localizedExample = getLocalizedExample(type, locale);
     const hasTypedFormat = type === 'conventional' || type === 'gitmoji';
@@ -289,22 +325,34 @@ const finalPrompt = (type: CommitType, generate: number, locale: string) => {
 };
 
 export const generatePrompt = (promptOptions: PromptOptions) => {
-    const { systemPrompt, systemPromptPath, type, generate, locale } = promptOptions;
+    const { systemPrompt, systemPromptPath, type, generate, locale, isReasoning } = promptOptions;
+    const suffix = finalPrompt(type, generate, locale);
+
+    // Custom system prompt takes priority (user override)
     if (systemPrompt) {
-        return `${parseTemplate(systemPrompt, promptOptions)}\n${finalPrompt(type, generate, locale)}`;
+        return `${parseTemplate(systemPrompt, promptOptions)}\n${suffix}`;
     }
 
-    if (!systemPromptPath) {
-        return `${defaultPrompt(promptOptions)}\n${finalPrompt(type, generate, locale)}`;
+    // Custom system prompt file
+    if (systemPromptPath) {
+        try {
+            const systemPromptTemplate = fs.readFileSync(resolvePromptPath(systemPromptPath), 'utf-8');
+            return `${parseTemplate(systemPromptTemplate, promptOptions)}\n${suffix}`;
+        } catch (error) {
+            // Fall through to default/reasoning prompt
+        }
     }
 
-    try {
-        const systemPromptTemplate = fs.readFileSync(resolvePromptPath(systemPromptPath), 'utf-8');
-        return `${parseTemplate(systemPromptTemplate, promptOptions)}\n${finalPrompt(type, generate, locale)}`;
-    } catch (error) {
-        return `${defaultPrompt(promptOptions)}\n${finalPrompt(type, generate, locale)}`;
-    }
+    // Use reasoning-optimized prompt for reasoning models, default otherwise
+    const basePrompt = isReasoning ? reasoningPrompt(promptOptions) : defaultPrompt(promptOptions);
+    return `${basePrompt}\n${suffix}`;
 };
+
+/**
+ * Embedded in a rendered code review that contains at least one critical item. The commit
+ * flow reads it back to decide what to ask or warn about before committing.
+ */
+export const CRITICAL_ISSUES_MARKER = '<!-- HAS_CRITICAL_ISSUES -->';
 
 export const isValidConventionalMessage = (message: string): boolean => {
     // TODO: check loosely for issue that message is not coming out
@@ -372,6 +420,69 @@ export const validateSystemPrompt = async (config: ValidConfig) => {
     }
 };
 
-export const generateUserPrompt = (diff: string, _requestType: 'commit' | 'review' = 'commit'): string => {
-    return `\`\`\`diff\n${diff}\n\`\`\``;
+export interface CommitContext {
+    recentCommits?: string;
+    branchName?: string;
+    tickets?: TicketRef[];
+    convention?: ConventionProfile;
+    branchIntent?: BranchIntent;
+}
+
+const renderConvention = (convention: ConventionProfile): string => {
+    const total = Object.values(convention.typeDistribution).reduce((sum, count) => sum + count, 0);
+    const lines = [`## Repository Conventions (match these)`];
+
+    if (convention.dominantType) {
+        lines.push(`- Predominant style: ${convention.dominantType}`);
+    }
+    if (total > 0) {
+        const types = Object.entries(convention.typeDistribution)
+            .sort((a, b) => b[1] - a[1])
+            .map(([type, count]) => `${type} (${Math.round((count / total) * 100)}%)`)
+            .join(', ');
+        lines.push(`- Common types: ${types}`);
+    }
+    if (convention.commonScopes.length > 0) {
+        lines.push(`- Common scopes: ${convention.commonScopes.join(', ')}`);
+    }
+    lines.push(`- Typical subject length: ~${convention.avgSubjectLength} chars`);
+
+    return lines.join('\n');
+};
+
+const renderTickets = (tickets: TicketRef[]): string => {
+    const ids = tickets.map(ticket => ticket.id).join(', ');
+    const hints = tickets.map(ticket => `"${ticket.footerHint}"`).join(', ');
+    return `## Ticket Reference\nBranch references ${ids}. Add ${hints} to the footer if relevant.`;
+};
+
+const renderBranchIntent = (branchIntent: BranchIntent): string =>
+    `## Branch Intent\nBranch prefix suggests commit type: ${branchIntent.type}`;
+
+export const generateUserPrompt = (diff: string, requestType: 'commit' | 'review' = 'commit', context?: CommitContext): string => {
+    const sections: string[] = [];
+
+    if (context?.recentCommits) {
+        sections.push(`## Recent Commits (for style reference)\n${context.recentCommits}`);
+    }
+
+    // Commit-message guidance is meaningless for a code-review response.
+    if (requestType === 'commit') {
+        if (context?.convention) {
+            sections.push(renderConvention(context.convention));
+        }
+        if (context?.tickets && context.tickets.length > 0) {
+            sections.push(renderTickets(context.tickets));
+        }
+        if (context?.branchIntent?.type) {
+            sections.push(renderBranchIntent(context.branchIntent));
+        }
+    }
+
+    if (context?.branchName) {
+        sections.push(`## Branch\n${context.branchName}`);
+    }
+
+    const contextBlock = sections.length > 0 ? sections.join('\n\n') + '\n\n' : '';
+    return `${contextBlock}\`\`\`diff\n${diff}\n\`\`\``;
 };

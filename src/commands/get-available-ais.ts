@@ -3,44 +3,28 @@ import { BUILTIN_SERVICES, BuiltinService, ModelName, RawConfig, ValidConfig } f
 
 const isNonEmptyString = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
 
-const isCopilotSdkInstalled = (): boolean => {
-    try {
-        const resolve = typeof require !== 'undefined' ? require.resolve : undefined;
-        if (resolve) {
-            resolve('@github/copilot-sdk');
-            return true;
-        }
-        // ESM fallback: import.meta.resolve is sync in Node 20+
-        if (typeof import.meta.resolve === 'function') {
-            import.meta.resolve('@github/copilot-sdk');
-            return true;
-        }
-        return false;
-    } catch {
-        return false;
-    }
-};
-
-let copilotSdkInstalled: boolean | undefined;
-
 const hasCopilotSdkAvailable = (value: RawConfig): boolean => {
-    if (!hasConfiguredModels(value)) {
-        return false;
-    }
-    if (copilotSdkInstalled === undefined) {
-        copilotSdkInstalled = isCopilotSdkInstalled();
-    }
-    return copilotSdkInstalled;
+    // COPILOT_SDK activates on an explicit opt-in signal only: a configured
+    // model, a key, or COPILOT_GITHUB_TOKEN (issue #254 — the SDK ships as an
+    // optional dependency, so its mere presence is not user intent).
+    //
+    // Availability is intentionally NOT gated on whether the @github/copilot-sdk
+    // package resolves. That package is an optionalDependency (omitted by
+    // Homebrew and `--omit=optional` installs), so probing for it silently
+    // dropped the provider even when the user had opted in and the Copilot CLI
+    // was healthy (issue #256). If the package is genuinely missing, the service
+    // surfaces an actionable SDK_NOT_INSTALLED error at request time instead.
+    return hasConfiguredModels(value) || isNonEmptyString(value.key as string) || isNonEmptyString(process.env.COPILOT_GITHUB_TOKEN);
 };
 
-const hasConfiguredModels = (value: RawConfig): boolean => {
-    const models = Array.isArray(value.model)
-        ? (value.model as string[])
-        : isNonEmptyString(value.model)
-          ? [(value.model as string).trim()]
-          : [];
-    return models.length > 0;
+const getConfiguredModels = (value: RawConfig): string[] => {
+    if (Array.isArray(value.model)) {
+        return value.model as string[];
+    }
+    return isNonEmptyString(value.model) ? [(value.model as string).trim()] : [];
 };
+
+const hasConfiguredModels = (value: RawConfig): boolean => getConfiguredModels(value).length > 0;
 
 const hasBedrockAccess = (value: RawConfig): boolean => {
     const hasApiKey = isNonEmptyString(value.key as string);
@@ -78,7 +62,8 @@ export const getAvailableAIs = (config: ValidConfig, requestType: RequestType): 
         .filter(([key, value]) => {
             switch (requestType) {
                 case 'commit':
-                    if (key === 'OLLAMA') {
+                    // CLAUDE_CODE opts in via a configured model; the CLI binary is checked at request time.
+                    if (key === 'OLLAMA' || key === 'CLAUDE_CODE' || key === 'GEMINI_CLI') {
                         return !!value && hasConfiguredModels(value);
                     }
                     if (key === 'COPILOT_SDK') {
@@ -93,11 +78,11 @@ export const getAvailableAIs = (config: ValidConfig, requestType: RequestType): 
                     return !!value.key && value.key.length > 0;
                 case 'review':
                     const codeReview = config.codeReview || value.codeReview;
-                    if (key === 'OLLAMA') {
+                    if (key === 'OLLAMA' || key === 'CLAUDE_CODE' || key === 'GEMINI_CLI') {
                         return !!value && hasConfiguredModels(value) && codeReview;
                     }
                     if (key === 'COPILOT_SDK') {
-                        return !!value && hasConfiguredModels(value) && codeReview;
+                        return !!value && hasCopilotSdkAvailable(value) && codeReview;
                     }
                     if (key === 'HUGGINGFACE') {
                         return !!value && !!value.cookie && codeReview;
@@ -108,11 +93,11 @@ export const getAvailableAIs = (config: ValidConfig, requestType: RequestType): 
                     return !!value.key && value.key.length > 0 && codeReview;
                 case 'watch':
                     const watchMode = config.watchMode || value.watchMode;
-                    if (key === 'OLLAMA') {
+                    if (key === 'OLLAMA' || key === 'CLAUDE_CODE' || key === 'GEMINI_CLI') {
                         return !!value && hasConfiguredModels(value) && watchMode;
                     }
                     if (key === 'COPILOT_SDK') {
-                        return !!value && hasConfiguredModels(value) && watchMode;
+                        return !!value && hasCopilotSdkAvailable(value) && watchMode;
                     }
                     if (key === 'HUGGINGFACE') {
                         return !!value && !!value.cookie && watchMode;
@@ -129,4 +114,4 @@ export const getAvailableAIs = (config: ValidConfig, requestType: RequestType): 
         .map(([key]) => key);
 };
 
-export { hasBedrockAccess, hasConfiguredModels };
+export { getConfiguredModels, hasBedrockAccess, hasConfiguredModels, hasCopilotSdkAvailable };

@@ -4,7 +4,7 @@ import path from 'path';
 
 import ini from 'ini';
 
-import { DEFAULT_DIFF_COMPRESSION_CONFIG, DEFAULT_DIFF_CONTEXT } from './diff-compressor.js';
+import { DEFAULT_DIFF_COMPRESSION_CONFIG, DEFAULT_DIFF_CONTEXT, DiffCompressionMode } from './diff-compressor.js';
 import { KnownError } from './error.js';
 import { fileExists } from './fs.js';
 import { flattenDeep } from './utils.js';
@@ -39,6 +39,8 @@ export const hasOwn = (object: unknown, key: PropertyKey) => hasOwnProperty.call
 export const BUILTIN_SERVICES = [
     'OPENAI',
     'COPILOT_SDK',
+    'CLAUDE_CODE',
+    'GEMINI_CLI',
     'OPENROUTER',
     'OLLAMA',
     'HUGGINGFACE',
@@ -54,6 +56,17 @@ export const BUILTIN_SERVICES = [
     'BEDROCK',
 ] as const;
 export type BuiltinService = (typeof BUILTIN_SERVICES)[number];
+
+// Providers that authenticate through their own subscription CLI rather than an API key.
+// Membership means "no key to check", not "a configured model is the only opt-in signal":
+// COPILOT_SDK also activates on a key or COPILOT_GITHUB_TOKEN (issue #254).
+//
+// Consumed by doctor's health check, where it exists so a future member inherits the model
+// gate instead of the API-key check that misreported CLAUDE_CODE and GEMINI_CLI (issue
+// #268). It is deliberately NOT the runtime gate's grouping in get-available-ais.ts — that
+// one groups OLLAMA with CLAUDE_CODE/GEMINI_CLI and gives COPILOT_SDK its own wider
+// predicate, so swapping this set in there would reintroduce #268 from the other side.
+export const SUBSCRIPTION_CLI_SERVICES: readonly BuiltinService[] = ['COPILOT_SDK', 'CLAUDE_CODE', 'GEMINI_CLI'];
 
 const getXdgBaseDirectory = (type: 'config' | 'data' | 'cache' | 'state'): string => {
     const platform = os.platform();
@@ -120,17 +133,14 @@ export const AICOMMIT_CONFIG_FILE_PATH = path.join(AICOMMIT_CONFIG_DIR, 'config.
 export const AICOMMIT_MAIN_LOG_FILE_PATH = path.join(AICOMMIT_LOGS_DIR, 'aicommit2-%DATE%.log');
 export const AICOMMIT_EXCEPTION_LOG_FILE_PATH = path.join(AICOMMIT_LOGS_DIR, 'exceptions-%DATE%.log');
 
+// Configuration section name rules (only uppercase letters, numbers and underscores allowed)
+export const SERVICE_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
+
 const findAllServices = (config: RawConfig): string[] => {
     const sections = Object.keys(config);
 
     // Include all built-in services and added sections
-    const allServices = new Set([
-        ...BUILTIN_SERVICES,
-        ...sections.filter(section =>
-            // Validate configuration section name rules (only uppercase letters and underscores allowed)
-            /^[A-Z][A-Z0-9_]*$/.test(section)
-        ),
-    ]);
+    const allServices = new Set([...BUILTIN_SERVICES, ...sections.filter(section => SERVICE_NAME_PATTERN.test(section))]);
 
     return Array.from(allServices);
 };
@@ -326,6 +336,8 @@ const generalConfigParsers = {
     forceGit: createBoolParser('forceGit'),
     stream: createBoolParser('stream'),
     disableLowerCase: createBoolParser('disableLowerCase'),
+    ticketExtraction: createBoolParser('ticketExtraction', true),
+    learnConventions: createBoolParser('learnConventions', true),
     jjAutoNew: createBoolParser('jjAutoNew'),
     autoCopy: createBoolParser('autoCopy'),
     modelNameDisplay: (modelNameDisplay?: string) => {
@@ -339,8 +351,8 @@ const generalConfigParsers = {
         if (!diffCompression) {
             return DEFAULT_DIFF_COMPRESSION_CONFIG.mode;
         }
-        parseAssert('diffCompression', /^(?:none|compact)$/.test(diffCompression), 'Must be none or compact');
-        return diffCompression as 'none' | 'compact';
+        parseAssert('diffCompression', /^(?:none|compact|auto)$/.test(diffCompression), 'Must be none, compact or auto');
+        return diffCompression as DiffCompressionMode;
     },
     maxHunkLines: (maxHunkLines?: string) => {
         if (!maxHunkLines) {
@@ -376,6 +388,46 @@ const generalConfigParsers = {
         return parsed;
     },
 } as const;
+
+// Shared by subscription-CLI providers (COPILOT_SDK, CLAUDE_CODE, GEMINI_CLI).
+// No implicit default model: an explicitly configured model is the opt-in
+// signal that activates the provider (issue #254). Each service falls back
+// to its own default model at request time.
+const subscriptionCliConfigParsers = {
+    key: (key?: string) => key || '',
+    envKey: (envKey?: string) => envKey || '',
+    model: (model?: string | string[]): string[] => {
+        if (!model) {
+            return [];
+        }
+        const modelList = typeof model === 'string' ? model.split(',') : model;
+        return modelList.map(m => m.trim()).filter(Boolean);
+    },
+    systemPrompt: generalConfigParsers.systemPrompt,
+    systemPromptPath: generalConfigParsers.systemPromptPath,
+    codeReviewPromptPath: generalConfigParsers.codeReviewPromptPath,
+    timeout: generalConfigParsers.timeout,
+    temperature: generalConfigParsers.temperature,
+    maxTokens: generalConfigParsers.maxTokens,
+    logging: generalConfigParsers.logging,
+    locale: generalConfigParsers.locale,
+    generate: generalConfigParsers.generate,
+    type: generalConfigParsers.type,
+    maxLength: generalConfigParsers.maxLength,
+    includeBody: generalConfigParsers.includeBody,
+    topP: generalConfigParsers.topP,
+    codeReview: generalConfigParsers.codeReview,
+    disabled: generalConfigParsers.disabled,
+    stream: generalConfigParsers.stream,
+    watchMode: generalConfigParsers.watchMode,
+    disableLowerCase: generalConfigParsers.disableLowerCase,
+    ticketExtraction: generalConfigParsers.ticketExtraction,
+    learnConventions: generalConfigParsers.learnConventions,
+    diffCompression: generalConfigParsers.diffCompression,
+    maxHunkLines: generalConfigParsers.maxHunkLines,
+    maxDiffLines: generalConfigParsers.maxDiffLines,
+    diffContext: generalConfigParsers.diffContext,
+};
 
 const modelConfigParsers: Record<ModelName, Record<string, (value: any) => any>> = {
     OPENAI: {
@@ -415,6 +467,8 @@ const modelConfigParsers: Record<ModelName, Record<string, (value: any) => any>>
         stream: generalConfigParsers.stream,
         watchMode: generalConfigParsers.watchMode,
         disableLowerCase: generalConfigParsers.disableLowerCase,
+        ticketExtraction: generalConfigParsers.ticketExtraction,
+        learnConventions: generalConfigParsers.learnConventions,
         diffCompression: generalConfigParsers.diffCompression,
         maxHunkLines: generalConfigParsers.maxHunkLines,
         maxDiffLines: generalConfigParsers.maxDiffLines,
@@ -459,6 +513,8 @@ const modelConfigParsers: Record<ModelName, Record<string, (value: any) => any>>
         stream: generalConfigParsers.stream,
         watchMode: generalConfigParsers.watchMode,
         disableLowerCase: generalConfigParsers.disableLowerCase,
+        ticketExtraction: generalConfigParsers.ticketExtraction,
+        learnConventions: generalConfigParsers.learnConventions,
         diffCompression: generalConfigParsers.diffCompression,
         maxHunkLines: generalConfigParsers.maxHunkLines,
         maxDiffLines: generalConfigParsers.maxDiffLines,
@@ -491,6 +547,8 @@ const modelConfigParsers: Record<ModelName, Record<string, (value: any) => any>>
         stream: generalConfigParsers.stream,
         watchMode: generalConfigParsers.watchMode,
         disableLowerCase: generalConfigParsers.disableLowerCase,
+        ticketExtraction: generalConfigParsers.ticketExtraction,
+        learnConventions: generalConfigParsers.learnConventions,
         diffCompression: generalConfigParsers.diffCompression,
         maxHunkLines: generalConfigParsers.maxHunkLines,
         maxDiffLines: generalConfigParsers.maxDiffLines,
@@ -524,6 +582,8 @@ const modelConfigParsers: Record<ModelName, Record<string, (value: any) => any>>
         stream: generalConfigParsers.stream,
         watchMode: generalConfigParsers.watchMode,
         disableLowerCase: generalConfigParsers.disableLowerCase,
+        ticketExtraction: generalConfigParsers.ticketExtraction,
+        learnConventions: generalConfigParsers.learnConventions,
         diffCompression: generalConfigParsers.diffCompression,
         maxHunkLines: generalConfigParsers.maxHunkLines,
         maxDiffLines: generalConfigParsers.maxDiffLines,
@@ -557,6 +617,8 @@ const modelConfigParsers: Record<ModelName, Record<string, (value: any) => any>>
         stream: generalConfigParsers.stream,
         watchMode: generalConfigParsers.watchMode,
         disableLowerCase: generalConfigParsers.disableLowerCase,
+        ticketExtraction: generalConfigParsers.ticketExtraction,
+        learnConventions: generalConfigParsers.learnConventions,
         diffCompression: generalConfigParsers.diffCompression,
         maxHunkLines: generalConfigParsers.maxHunkLines,
         maxDiffLines: generalConfigParsers.maxDiffLines,
@@ -590,6 +652,8 @@ const modelConfigParsers: Record<ModelName, Record<string, (value: any) => any>>
         stream: generalConfigParsers.stream,
         watchMode: generalConfigParsers.watchMode,
         disableLowerCase: generalConfigParsers.disableLowerCase,
+        ticketExtraction: generalConfigParsers.ticketExtraction,
+        learnConventions: generalConfigParsers.learnConventions,
         diffCompression: generalConfigParsers.diffCompression,
         maxHunkLines: generalConfigParsers.maxHunkLines,
         maxDiffLines: generalConfigParsers.maxDiffLines,
@@ -623,6 +687,8 @@ const modelConfigParsers: Record<ModelName, Record<string, (value: any) => any>>
         stream: generalConfigParsers.stream,
         watchMode: generalConfigParsers.watchMode,
         disableLowerCase: generalConfigParsers.disableLowerCase,
+        ticketExtraction: generalConfigParsers.ticketExtraction,
+        learnConventions: generalConfigParsers.learnConventions,
         diffCompression: generalConfigParsers.diffCompression,
         maxHunkLines: generalConfigParsers.maxHunkLines,
         maxDiffLines: generalConfigParsers.maxDiffLines,
@@ -685,6 +751,8 @@ const modelConfigParsers: Record<ModelName, Record<string, (value: any) => any>>
         stream: generalConfigParsers.stream,
         watchMode: generalConfigParsers.watchMode,
         disableLowerCase: generalConfigParsers.disableLowerCase,
+        ticketExtraction: generalConfigParsers.ticketExtraction,
+        learnConventions: generalConfigParsers.learnConventions,
         diffCompression: generalConfigParsers.diffCompression,
         maxHunkLines: generalConfigParsers.maxHunkLines,
         maxDiffLines: generalConfigParsers.maxDiffLines,
@@ -725,6 +793,8 @@ const modelConfigParsers: Record<ModelName, Record<string, (value: any) => any>>
         stream: generalConfigParsers.stream,
         watchMode: generalConfigParsers.watchMode,
         disableLowerCase: generalConfigParsers.disableLowerCase,
+        ticketExtraction: generalConfigParsers.ticketExtraction,
+        learnConventions: generalConfigParsers.learnConventions,
         diffCompression: generalConfigParsers.diffCompression,
         maxHunkLines: generalConfigParsers.maxHunkLines,
         maxDiffLines: generalConfigParsers.maxDiffLines,
@@ -758,6 +828,8 @@ const modelConfigParsers: Record<ModelName, Record<string, (value: any) => any>>
         stream: generalConfigParsers.stream,
         watchMode: generalConfigParsers.watchMode,
         disableLowerCase: generalConfigParsers.disableLowerCase,
+        ticketExtraction: generalConfigParsers.ticketExtraction,
+        learnConventions: generalConfigParsers.learnConventions,
         diffCompression: generalConfigParsers.diffCompression,
         maxHunkLines: generalConfigParsers.maxHunkLines,
         maxDiffLines: generalConfigParsers.maxDiffLines,
@@ -791,6 +863,8 @@ const modelConfigParsers: Record<ModelName, Record<string, (value: any) => any>>
         stream: generalConfigParsers.stream,
         watchMode: generalConfigParsers.watchMode,
         disableLowerCase: generalConfigParsers.disableLowerCase,
+        ticketExtraction: generalConfigParsers.ticketExtraction,
+        learnConventions: generalConfigParsers.learnConventions,
         diffCompression: generalConfigParsers.diffCompression,
         maxHunkLines: generalConfigParsers.maxHunkLines,
         maxDiffLines: generalConfigParsers.maxDiffLines,
@@ -801,11 +875,29 @@ const modelConfigParsers: Record<ModelName, Record<string, (value: any) => any>>
         envKey: (envKey?: string) => envKey || '',
         model: (model?: string | string[]): string[] => {
             if (!model) {
-                return ['deepseek-chat'];
+                return ['deepseek-v4-flash'];
             }
             const modelList = typeof model === 'string' ? model?.split(',') : model;
 
             return modelList.map(m => m.trim()).filter(m => !!m && m.length > 0);
+        },
+        thinking: (value?: string | boolean): boolean | undefined => {
+            if (value === undefined || value === null || value === '') {
+                return undefined;
+            }
+            if (typeof value === 'boolean') {
+                return value;
+            }
+            parseAssert('DEEPSEEK.thinking', /^(?:true|false)$/.test(value), 'Must be a boolean(true or false)');
+            return value === 'true';
+        },
+        reasoningEffort: (value?: string): 'high' | 'max' | undefined => {
+            if (!value || value.trim() === '') {
+                return undefined;
+            }
+            const v = value.trim().toLowerCase();
+            parseAssert('DEEPSEEK.reasoningEffort', v === 'high' || v === 'max', 'Must be high or max');
+            return v as 'high' | 'max';
         },
         topP: generalConfigParsers.topP,
         systemPrompt: generalConfigParsers.systemPrompt,
@@ -825,6 +917,8 @@ const modelConfigParsers: Record<ModelName, Record<string, (value: any) => any>>
         stream: generalConfigParsers.stream,
         watchMode: generalConfigParsers.watchMode,
         disableLowerCase: generalConfigParsers.disableLowerCase,
+        ticketExtraction: generalConfigParsers.ticketExtraction,
+        learnConventions: generalConfigParsers.learnConventions,
         diffCompression: generalConfigParsers.diffCompression,
         maxHunkLines: generalConfigParsers.maxHunkLines,
         maxDiffLines: generalConfigParsers.maxDiffLines,
@@ -858,44 +952,16 @@ const modelConfigParsers: Record<ModelName, Record<string, (value: any) => any>>
         stream: generalConfigParsers.stream,
         watchMode: generalConfigParsers.watchMode,
         disableLowerCase: generalConfigParsers.disableLowerCase,
+        ticketExtraction: generalConfigParsers.ticketExtraction,
+        learnConventions: generalConfigParsers.learnConventions,
         diffCompression: generalConfigParsers.diffCompression,
         maxHunkLines: generalConfigParsers.maxHunkLines,
         maxDiffLines: generalConfigParsers.maxDiffLines,
         diffContext: generalConfigParsers.diffContext,
     },
-    COPILOT_SDK: {
-        key: (key?: string) => key || '',
-        envKey: (envKey?: string) => envKey || '',
-        model: (model?: string | string[]): string[] => {
-            if (!model) {
-                return ['gpt-4.1'];
-            }
-            const modelList = typeof model === 'string' ? model?.split(',') : model;
-            return modelList.map(m => m.trim()).filter(m => !!m && m.length > 0);
-        },
-        systemPrompt: generalConfigParsers.systemPrompt,
-        systemPromptPath: generalConfigParsers.systemPromptPath,
-        codeReviewPromptPath: generalConfigParsers.codeReviewPromptPath,
-        timeout: generalConfigParsers.timeout,
-        temperature: generalConfigParsers.temperature,
-        maxTokens: generalConfigParsers.maxTokens,
-        logging: generalConfigParsers.logging,
-        locale: generalConfigParsers.locale,
-        generate: generalConfigParsers.generate,
-        type: generalConfigParsers.type,
-        maxLength: generalConfigParsers.maxLength,
-        includeBody: generalConfigParsers.includeBody,
-        topP: generalConfigParsers.topP,
-        codeReview: generalConfigParsers.codeReview,
-        disabled: generalConfigParsers.disabled,
-        stream: generalConfigParsers.stream,
-        watchMode: generalConfigParsers.watchMode,
-        disableLowerCase: generalConfigParsers.disableLowerCase,
-        diffCompression: generalConfigParsers.diffCompression,
-        maxHunkLines: generalConfigParsers.maxHunkLines,
-        maxDiffLines: generalConfigParsers.maxDiffLines,
-        diffContext: generalConfigParsers.diffContext,
-    },
+    COPILOT_SDK: subscriptionCliConfigParsers,
+    CLAUDE_CODE: subscriptionCliConfigParsers,
+    GEMINI_CLI: subscriptionCliConfigParsers,
     BEDROCK: {
         key: (key?: string) => key || '',
         envKey: (envKey?: string) => (envKey && envKey.length > 0 ? envKey : 'BEDROCK_API_KEY'),
@@ -985,6 +1051,8 @@ const modelConfigParsers: Record<ModelName, Record<string, (value: any) => any>>
         stream: generalConfigParsers.stream,
         watchMode: generalConfigParsers.watchMode,
         disableLowerCase: generalConfigParsers.disableLowerCase,
+        ticketExtraction: generalConfigParsers.ticketExtraction,
+        learnConventions: generalConfigParsers.learnConventions,
         inferenceParameters: createJsonObjectParser('BEDROCK.inferenceParameters'),
         diffCompression: generalConfigParsers.diffCompression,
         maxHunkLines: generalConfigParsers.maxHunkLines,
@@ -1160,14 +1228,16 @@ export const readConfigFile = async (): Promise<RawConfig> => {
         cachedConfigPath = configPath;
         return cachedRawConfig;
     } catch (error) {
-        // If the file doesn't exist or can't be read, return an empty config
+        loadedConfigPath = undefined;
+        // Not having a config file at all is a supported setup — everything can come from
+        // CLI flags and environment variables.
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-            loadedConfigPath = undefined;
             return {};
         }
-        console.error(`Error reading config file ${configPath}:`, error);
-        loadedConfigPath = undefined;
-        return {};
+        // Anything else (unreadable file, malformed INI) used to fall through to an empty
+        // config, so the run failed much later with an unrelated error. Fail here instead,
+        // naming the file that could not be read.
+        throw new KnownError(`Failed to read config file ${configPath}: ${(error as Error).message}`);
     }
 };
 
@@ -1273,7 +1343,7 @@ export const setConfigs = async (keyValues: [key: string, value: any][]) => {
         }
 
         // Custom services
-        const isValidServiceName = /^[A-Z][A-Z0-9_]*$/.test(modelName);
+        const isValidServiceName = SERVICE_NAME_PATTERN.test(modelName);
         if (!isValidServiceName) {
             throw new KnownError(`Invalid service name: ${modelName}. Service names must be uppercase letters, numbers, and underscores.`);
         }
@@ -1389,6 +1459,24 @@ export const printConfigPath = async () => {
     console.log(await getConfigPath());
 };
 
+/**
+ * One config key's parser. `any` on both sides is deliberate and matches the declared type
+ * of `modelConfigParsers`: parsers are heterogeneous per key (string, number, boolean, JSON
+ * object) and receive raw INI/CLI/env input, so neither side narrows at this seam.
+ */
+export type ConfigParser = (value: any) => any;
+
+/**
+ * Parsers that accept the config keys of a section, or of the top level when no service
+ * name is given. Backs `aicommit2 config validate`, which reports keys no parser accepts.
+ */
+export const getConfigParsers = (serviceName?: string): Record<string, ConfigParser> => {
+    if (!serviceName) {
+        return generalConfigParsers as Record<string, ConfigParser>;
+    }
+    return (modelConfigParsers[serviceName as ModelName] || createConfigParser(serviceName)) as Record<string, ConfigParser>;
+};
+
 const createConfigParser = (serviceName: string) => ({
     compatible: createBoolParser('compatible'),
     stream: createBoolParser('stream'),
@@ -1426,6 +1514,8 @@ const createConfigParser = (serviceName: string) => ({
     disabled: generalConfigParsers.disabled,
     watchMode: generalConfigParsers.watchMode,
     disableLowerCase: generalConfigParsers.disableLowerCase,
+    ticketExtraction: generalConfigParsers.ticketExtraction,
+    learnConventions: generalConfigParsers.learnConventions,
     autoCopy: generalConfigParsers.autoCopy,
     diffCompression: generalConfigParsers.diffCompression,
     maxHunkLines: generalConfigParsers.maxHunkLines,

@@ -3,13 +3,12 @@ import readline from 'readline';
 import chalk from 'chalk';
 import figlet from 'figlet';
 import gradient from 'gradient-string';
-import ora, { Ora, Options as OraOptions } from 'ora';
+import ora, { Options, Ora } from 'ora';
 
+import { LARGE_DIFF_THRESHOLD_BYTES } from '../utils/diff-compressor.js';
 import { getDetectedMessage } from '../utils/vcs.js';
 
 import type { DiffCompressionStats } from '../utils/diff-compressor.js';
-
-const LARGE_DIFF_THRESHOLD_BYTES = 100_000;
 
 export class ConsoleManager {
     private title = 'aicommit2';
@@ -25,7 +24,7 @@ export class ConsoleManager {
         }
     }
 
-    showLoader(text: string, spinner?: OraOptions['spinner']) {
+    showLoader(text: string, spinner?: Options['spinner']) {
         if (this.loader) {
             this.loader.text = text;
             return;
@@ -65,7 +64,7 @@ export class ConsoleManager {
         const isLargeDiff = diffSizeBytes > LARGE_DIFF_THRESHOLD_BYTES;
         if (isLargeDiff && !compressionStats) {
             console.log(chalk.yellow(`⚠ Large diff detected (${diffSize}). This may increase processing time and costs.`));
-            console.log(chalk.dim(`  Consider using --exclude to filter large files or diffCompression=compact.\n`));
+            console.log(chalk.dim(`  Consider using --exclude to filter large files or diffCompression=auto (default) / compact.\n`));
         }
     }
 

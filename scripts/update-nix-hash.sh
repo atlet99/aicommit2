@@ -45,7 +45,7 @@ rm -f flake.nix.tmp
 echo -e "${GREEN}✓ Updated version to ${VERSION}${NC}"
 
 # Set a known bad hash to trigger mismatch
-sed -i.tmp 's|hash = "sha256-.*";|hash = "sha256-INVALIDHASHPLACEHOLDER000000000000000000000=";|' flake.nix
+sed -i.tmp 's|hash = "sha256-[^"]*";|hash = "sha256-INVALIDHASHPLACEHOLDER000000000000000000000=";|' flake.nix
 rm -f flake.nix.tmp
 
 # Build and capture the correct hash
@@ -53,7 +53,7 @@ echo "Building to calculate correct hash (this will fail, that's expected)..."
 BUILD_OUTPUT=$(nix build --print-out-paths 2>&1 || true)
 
 # Extract the correct hash from error message
-CORRECT_HASH=$(echo "$BUILD_OUTPUT" | grep -o 'got:.*' | awk '{print $2}')
+CORRECT_HASH=$(echo "$BUILD_OUTPUT" | grep 'got:' | grep -oE 'sha256-[A-Za-z0-9+/=]{44}' | head -n1)
 
 if [ -z "$CORRECT_HASH" ]; then
     echo -e "${RED}✗ Failed to extract hash from build output${NC}"
@@ -69,7 +69,7 @@ fi
 echo -e "${GREEN}✓ Calculated hash: ${CORRECT_HASH}${NC}"
 
 # Update hash in flake.nix
-sed -i.tmp "s|hash = \"sha256-.*\";|hash = \"${CORRECT_HASH}\";|" flake.nix
+sed -i.tmp "s|hash = \"sha256-[^\"]*\";|hash = \"${CORRECT_HASH}\";|" flake.nix
 rm -f flake.nix.tmp
 echo -e "${GREEN}✓ Updated hash in flake.nix${NC}"
 

@@ -10,10 +10,12 @@ import {
     getCopilotSdkModelCandidates,
     isCopilotSdkAuthError,
     isCopilotSdkClassicPatError,
+    isCopilotSdkCliNotFoundError,
     isCopilotSdkModelAccessError,
+    resolveCopilotSdkToken,
 } from './copilot-sdk.utils.js';
 import { RequestType, logAIComplete, logAIError, logAIPayload, logAIPrompt, logAIRequest, logAIResponse } from '../../utils/ai-log.js';
-import { DEFAULT_PROMPT_OPTIONS, PromptOptions, codeReviewPrompt, generatePrompt } from '../../utils/prompt.js';
+import { codeReviewPrompt, generatePrompt } from '../../utils/prompt.js';
 
 type CopilotSdkSession = {
     sendAndWait: (params: { prompt: string }) => Promise<unknown>;
@@ -25,7 +27,7 @@ type CopilotSdkClient = {
 };
 
 type CopilotSdkModule = {
-    CopilotClient: new (options?: Record<string, unknown>) => CopilotSdkClient;
+    CopilotClient: new (options?: unknown) => CopilotSdkClient;
     approveAll: unknown;
 };
 
@@ -33,7 +35,7 @@ export class CopilotSdkService extends AIService {
     constructor(protected readonly params: AIServiceParams) {
         super(params);
         this.colors = {
-            primary: '#1f6feb',
+            primary: '#8957e5',
             secondary: '#FFF',
         };
         this.serviceName = chalk.bgHex(this.colors.primary).hex(this.colors.secondary).bold(`[Copilot SDK${this.formatModelSuffix()}]`);
@@ -48,8 +50,11 @@ export class CopilotSdkService extends AIService {
         if (isCopilotSdkClassicPatError(message)) {
             return 'Copilot rejected classic ghp_ token. Use COPILOT_GITHUB_TOKEN with a Fine-Grained PAT or authenticate via copilot /login.';
         }
+        if (error.code === 'CLI_NOT_INSTALLED' || isCopilotSdkCliNotFoundError(message)) {
+            return 'Copilot CLI runtime is missing or broken. Reinstall: npm install -g aicommit2 @github/copilot-sdk, then retry.';
+        }
         if (error.code === 'AUTHENTICATION_FAILED' || isCopilotSdkAuthError(message)) {
-            return 'Copilot authentication failed. Install/authenticate Copilot CLI, then retry.';
+            return 'Copilot authentication failed. Run `copilot` to log in, `gh auth login --scopes copilot`, or set COPILOT_GITHUB_TOKEN, then retry.';
         }
         if (message.includes('ERR_UNKNOWN_BUILTIN_MODULE') && message.includes('node:sqlite')) {
             return 'Copilot SDK requires a newer Node.js runtime (node:sqlite is unavailable). Please use Node.js 22+ and retry.';
@@ -81,20 +86,8 @@ export class CopilotSdkService extends AIService {
 
     private async generateMessage(requestType: RequestType): Promise<AIResponse[]> {
         const diff = this.params.stagedDiff.diff;
-        const { systemPrompt, systemPromptPath, codeReviewPromptPath, locale, generate, type, maxLength } = this.params.config;
-
-        const promptOptions: PromptOptions = {
-            ...DEFAULT_PROMPT_OPTIONS,
-            locale,
-            maxLength,
-            type,
-            generate,
-            systemPrompt,
-            systemPromptPath,
-            codeReviewPromptPath,
-            vcs_branch: this.params.branchName || '',
-        };
-
+        const { generate, type } = this.params.config;
+        const promptOptions = this.buildPromptOptions();
         const generatedSystemPrompt = requestType === 'review' ? codeReviewPrompt(promptOptions) : generatePrompt(promptOptions);
         const userPrompt = requestType === 'review' ? diff : `Here's the diff:\n\n${diff}`;
         const content = await this.makeRequest(generatedSystemPrompt, userPrompt, requestType, diff);
@@ -107,7 +100,7 @@ export class CopilotSdkService extends AIService {
 
     private async loadSdkModule(): Promise<CopilotSdkModule> {
         try {
-            return (await import('@github/copilot-sdk')) as CopilotSdkModule;
+            return (await import('@github/copilot-sdk')) as unknown as CopilotSdkModule;
         } catch (error) {
             const sdkError = new Error('Copilot SDK package is missing. Install with: npm install @github/copilot-sdk') as AIServiceError;
             sdkError.code = 'SDK_NOT_INSTALLED';
@@ -149,6 +142,9 @@ export class CopilotSdkService extends AIService {
         const modelCandidates = getCopilotSdkModelCandidates(configuredModel);
         const { logging } = this.params.config;
 
+        // Resolve the auth token once (may spawn `gh`), not per model-retry iteration.
+        const resolvedToken = resolveCopilotSdkToken(process.env);
+
         let lastError: AIServiceError | undefined;
         for (const model of modelCandidates) {
             const url = 'copilot-sdk://session';
@@ -167,7 +163,7 @@ export class CopilotSdkService extends AIService {
             const startTime = Date.now();
             let client: CopilotSdkClient | undefined;
             try {
-                const clientOptions = buildCopilotSdkClientOptions(process.env);
+                const clientOptions = buildCopilotSdkClientOptions(process.env, resolvedToken);
                 client = new CopilotClient(clientOptions);
                 const session = await client.createSession({
                     model,
@@ -188,6 +184,9 @@ export class CopilotSdkService extends AIService {
             } catch (error) {
                 const aiError = error instanceof Error ? (error as AIServiceError) : (new Error(String(error)) as AIServiceError);
                 const message = aiError.message || String(error);
+                if (!aiError.code && isCopilotSdkCliNotFoundError(message)) {
+                    aiError.code = 'CLI_NOT_INSTALLED';
+                }
                 if (!aiError.code && isCopilotSdkAuthError(message)) {
                     aiError.code = 'AUTHENTICATION_FAILED';
                 }
@@ -204,7 +203,11 @@ export class CopilotSdkService extends AIService {
                 }
             } finally {
                 if (client?.stop) {
-                    await client.stop();
+                    try {
+                        await client.stop();
+                    } catch {
+                        // Ignore stop failures so they don't mask the in-flight error.
+                    }
                 }
             }
         }

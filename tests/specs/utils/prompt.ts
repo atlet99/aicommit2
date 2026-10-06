@@ -1,12 +1,6 @@
 import { expect, testSuite } from 'manten';
 
-import {
-    DEFAULT_PROMPT_OPTIONS,
-    PromptOptions,
-    generateBodyPrompt,
-    generatePrompt,
-    generateSubjectOnlyPrompt,
-} from '../../../src/utils/prompt.js';
+import { DEFAULT_PROMPT_OPTIONS, PromptOptions, generatePrompt, generateUserPrompt } from '../../../src/utils/prompt.js';
 
 export default testSuite(({ describe }) => {
     describe('Prompt Generation', ({ test, describe }) => {
@@ -58,120 +52,166 @@ export default testSuite(({ describe }) => {
                 });
                 expect(result).toContain('Generate in ja language');
             });
-        });
 
-        describe('generateSubjectOnlyPrompt', ({ test }) => {
-            test('should instruct body to be empty string', () => {
-                const result = generateSubjectOnlyPrompt(baseOptions);
-                expect(result).toContain('MUST be empty string');
-            });
-
-            test('should still include subject instructions', () => {
-                const result = generateSubjectOnlyPrompt(baseOptions);
-                expect(result).toContain('subject');
-                expect(result).toContain('conventional');
-            });
-
-            test('should include JSON format instructions', () => {
-                const result = generateSubjectOnlyPrompt(baseOptions);
-                expect(result).toContain('JSON array');
-                expect(result).toContain('Return valid JSON only');
-            });
-
-            test('should include localized example with empty body', () => {
-                const result = generateSubjectOnlyPrompt(baseOptions);
-                expect(result).toContain('"body": ""');
-                expect(result).toContain('"footer": ""');
-            });
-
-            test('should use custom systemPrompt when provided', () => {
-                const result = generateSubjectOnlyPrompt({
-                    ...baseOptions,
-                    systemPrompt: 'Custom instruction',
-                });
-                expect(result).toContain('Custom instruction');
-                expect(result).toContain('MUST be empty string');
-            });
-
-            test('should handle gitmoji type', () => {
-                const result = generateSubjectOnlyPrompt({
-                    ...baseOptions,
-                    type: 'gitmoji',
-                });
-                expect(result).toContain('gitmoji');
-                expect(result).toContain('MUST be empty string');
-            });
-
-            test('should handle empty commit type', () => {
-                const result = generateSubjectOnlyPrompt({
-                    ...baseOptions,
-                    type: '',
-                });
-                expect(result).toContain('MUST be empty string');
-            });
-
-            test('should respect generate count', () => {
-                const result = generateSubjectOnlyPrompt({
-                    ...baseOptions,
-                    generate: 3,
-                });
-                expect(result).toContain('exactly 3 objects');
-            });
-        });
-
-        describe('generateBodyPrompt', ({ test }) => {
-            test('should include the subject in the prompt', () => {
-                const result = generateBodyPrompt('feat(auth): add login flow', 'en');
-                expect(result).toContain('feat(auth): add login flow');
-            });
-
-            test('should include locale', () => {
-                const result = generateBodyPrompt('fix: bug', 'ko');
-                expect(result).toContain('ko');
-            });
-
-            test('should request JSON response', () => {
-                const result = generateBodyPrompt('fix: bug', 'en');
-                expect(result).toContain('JSON');
-                expect(result).toContain('"body"');
-                expect(result).toContain('"footer"');
-            });
-
-            test('should instruct to keep subject as-is', () => {
-                const result = generateBodyPrompt('feat: new feature', 'en');
-                expect(result).toContain('do NOT modify');
-            });
-
-            test('should include WHY guidance', () => {
-                const result = generateBodyPrompt('fix: bug', 'en');
+            test('should use reasoning prompt when isReasoning is true', () => {
+                const result = generatePrompt({ ...baseOptions, isReasoning: true });
+                expect(result).toContain('expert developer');
+                expect(result).toContain('primary intent');
                 expect(result).toContain('WHY');
             });
 
-            test('should request JSON array format with subject preserved', () => {
-                const subject = 'refactor(api): simplify handlers';
-                const result = generateBodyPrompt(subject, 'en');
-                expect(result).toContain(`"subject": "${subject}"`);
+            test('should use default prompt when isReasoning is false', () => {
+                const result = generatePrompt({ ...baseOptions, isReasoning: false });
+                expect(result).toContain('Generate exactly');
+                expect(result).not.toContain('expert developer');
+            });
+
+            test('should use default prompt when isReasoning is not set', () => {
+                const result = generatePrompt(baseOptions);
+                expect(result).not.toContain('expert developer');
+            });
+
+            test('reasoning prompt should still include JSON format instructions', () => {
+                const result = generatePrompt({ ...baseOptions, isReasoning: true });
+                expect(result).toContain('JSON array');
+                expect(result).toContain('"subject"');
+                expect(result).toContain('"body"');
+            });
+
+            test('reasoning prompt should respect locale', () => {
+                const result = generatePrompt({ ...baseOptions, isReasoning: true, locale: 'ko' });
+                expect(result).toContain('ko');
+            });
+
+            test('custom systemPrompt should override reasoning prompt', () => {
+                const result = generatePrompt({
+                    ...baseOptions,
+                    isReasoning: true,
+                    systemPrompt: 'Custom override prompt',
+                });
+                expect(result).toContain('Custom override prompt');
+                expect(result).not.toContain('expert developer');
             });
         });
 
-        describe('prompt consistency', ({ test }) => {
-            test('generatePrompt and generateSubjectOnlyPrompt should share preamble', () => {
-                const fullPrompt = generatePrompt(baseOptions);
-                const subjectOnly = generateSubjectOnlyPrompt(baseOptions);
-
-                // Both should contain the same default prompt preamble
-                const preambleIndicator = 'commit message';
-                expect(fullPrompt).toContain(preambleIndicator);
-                expect(subjectOnly).toContain(preambleIndicator);
+        describe('generateUserPrompt', ({ test }) => {
+            test('should wrap diff in code block', () => {
+                const result = generateUserPrompt('some diff');
+                expect(result).toBe('```diff\nsome diff\n```');
             });
 
-            test('generateSubjectOnlyPrompt should differ from generatePrompt in final instructions', () => {
-                const fullPrompt = generatePrompt(baseOptions);
-                const subjectOnly = generateSubjectOnlyPrompt(baseOptions);
+            test('should include recent commits when provided', () => {
+                const result = generateUserPrompt('diff content', 'commit', {
+                    recentCommits: 'feat(auth): add login\nfix(api): handle null',
+                });
+                expect(result).toContain('## Recent Commits (for style reference)');
+                expect(result).toContain('feat(auth): add login');
+                expect(result).toContain('fix(api): handle null');
+                expect(result).toContain('```diff');
+            });
 
-                // Subject-only should have empty body instruction, full should not
-                expect(subjectOnly).toContain('MUST be empty string');
-                expect(fullPrompt).not.toContain('MUST be empty string');
+            test('should include branch name when provided', () => {
+                const result = generateUserPrompt('diff content', 'commit', {
+                    branchName: 'feature/auth',
+                });
+                expect(result).toContain('## Branch');
+                expect(result).toContain('feature/auth');
+            });
+
+            test('should work without context (backward compatible)', () => {
+                const result = generateUserPrompt('diff content');
+                expect(result).toBe('```diff\ndiff content\n```');
+            });
+
+            test('should place context before diff', () => {
+                const result = generateUserPrompt('diff content', 'commit', {
+                    recentCommits: 'feat: test',
+                    branchName: 'main',
+                });
+                const branchPos = result.indexOf('## Branch');
+                const diffPos = result.indexOf('```diff');
+                expect(branchPos).toBeLessThan(diffPos);
+            });
+
+            test('should skip empty context fields', () => {
+                const result = generateUserPrompt('diff content', 'commit', {
+                    recentCommits: '',
+                    branchName: '',
+                });
+                expect(result).toBe('```diff\ndiff content\n```');
+            });
+
+            test('should handle only recentCommits without branchName', () => {
+                const result = generateUserPrompt('diff content', 'commit', {
+                    recentCommits: 'fix: bug',
+                });
+                expect(result).toContain('## Recent Commits');
+                expect(result).not.toContain('## Branch');
+            });
+
+            test('should handle only branchName without recentCommits', () => {
+                const result = generateUserPrompt('diff content', 'commit', {
+                    branchName: 'hotfix/urgent',
+                });
+                expect(result).not.toContain('## Recent Commits');
+                expect(result).toContain('## Branch');
+                expect(result).toContain('hotfix/urgent');
+            });
+
+            test('should render convention profile as active constraints', () => {
+                const result = generateUserPrompt('diff content', 'commit', {
+                    convention: {
+                        dominantType: 'conventional',
+                        typeDistribution: { feat: 3, fix: 1 },
+                        commonScopes: ['auth', 'api'],
+                        avgSubjectLength: 46,
+                    },
+                });
+                expect(result).toContain('## Repository Conventions (match these)');
+                expect(result).toContain('Predominant style: conventional');
+                expect(result).toContain('feat (75%)');
+                expect(result).toContain('Common scopes: auth, api');
+                expect(result).toContain('~46 chars');
+            });
+
+            test('should render ticket reference with footer hint', () => {
+                const result = generateUserPrompt('diff content', 'commit', {
+                    tickets: [{ id: 'PROJ-9', kind: 'key', footerHint: 'Refs PROJ-9' }],
+                });
+                expect(result).toContain('## Ticket Reference');
+                expect(result).toContain('PROJ-9');
+                expect(result).toContain('Refs PROJ-9');
+            });
+
+            test('should render branch intent when type present', () => {
+                const result = generateUserPrompt('diff content', 'commit', {
+                    branchIntent: { type: 'feat', rawPrefix: 'feature' },
+                });
+                expect(result).toContain('## Branch Intent');
+                expect(result).toContain('commit type: feat');
+            });
+
+            test('should skip branch intent when type is null', () => {
+                const result = generateUserPrompt('diff content', 'commit', {
+                    branchIntent: { type: null, rawPrefix: 'main' },
+                });
+                expect(result).not.toContain('## Branch Intent');
+            });
+
+            test('should skip commit-only enrichment sections for review requests', () => {
+                const result = generateUserPrompt('diff content', 'review', {
+                    recentCommits: 'feat: prior',
+                    branchName: 'feature/PROJ-9',
+                    convention: { dominantType: 'conventional', typeDistribution: { feat: 1 }, commonScopes: [], avgSubjectLength: 20 },
+                    tickets: [{ id: 'PROJ-9', kind: 'key', footerHint: 'Refs PROJ-9' }],
+                    branchIntent: { type: 'feat', rawPrefix: 'feature' },
+                });
+                expect(result).not.toContain('## Repository Conventions');
+                expect(result).not.toContain('## Ticket Reference');
+                expect(result).not.toContain('## Branch Intent');
+                // shared context (history, branch) still flows to review prompts
+                expect(result).toContain('## Recent Commits');
+                expect(result).toContain('## Branch');
             });
         });
     });

@@ -69,3 +69,15 @@ testem.log
 
 # System Files
 Thumbs.db
+
+# golden eval artifacts (regenerated per run)
+tests/eval/golden/report.json
+tests/eval/golden/report.md
+tests/eval/golden/corpus.json
+
+# Grilling artifacts (local planning docs)
+/CONTEXT.md
+/docs/adr/
+
+# zvec-grep local index
+/.zvec-grep/

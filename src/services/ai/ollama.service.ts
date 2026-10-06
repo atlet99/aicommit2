@@ -9,7 +9,7 @@ import { AIResponse, AIService, AIServiceError, AIServiceParams } from './ai.ser
 import { RequestType, logAIComplete, logAIError, logAIPayload, logAIPrompt, logAIRequest, logAIResponse } from '../../utils/ai-log.js';
 import { DEFAULT_OLLAMA_HOST } from '../../utils/config.js';
 import { PlainErrorMessages } from '../../utils/error-messages.js';
-import { DEFAULT_PROMPT_OPTIONS, PromptOptions, codeReviewPrompt, generatePrompt } from '../../utils/prompt.js';
+import { codeReviewPrompt, generatePrompt } from '../../utils/prompt.js';
 import { capitalizeFirstLetter, getRandomNumber } from '../../utils/utils.js';
 import { HttpRequestBuilder } from '../http/http-request.builder.js';
 
@@ -21,6 +21,10 @@ export class OllamaService extends AIService {
     private key = '';
     private auth = '';
     private ollama: Ollama;
+    // ollama-js has no per-request signal param, so the active stream's signal is stashed
+    // here for `setupFetch` (the client's fetch override) to attach. Cleared after each
+    // stream so a later non-streaming request never inherits an aborted signal.
+    private activeSignal?: AbortSignal;
 
     constructor(protected readonly params: AIServiceParams) {
         super(params);
@@ -88,15 +92,16 @@ export class OllamaService extends AIService {
         const { generate, type } = this.params.config;
 
         return this.createStreamingCommitMessages$(
-            subject => {
-                this.streamChunks(subject).catch(err => subject.error(err));
+            (subject, signal) => {
+                this.streamChunks(subject, signal).catch(err => subject.error(err));
             },
             type,
             generate
         );
     };
 
-    private streamChunks = async (subject: Subject<string>): Promise<void> => {
+    private streamChunks = async (subject: Subject<string>, signal: AbortSignal): Promise<void> => {
+        this.activeSignal = signal;
         const diff = this.params.stagedDiff.diff;
         const { logging } = this.params.config;
         const generatedSystemPrompt = this.buildCommitPrompt();
@@ -155,23 +160,15 @@ export class OllamaService extends AIService {
             const duration = Date.now() - startTime;
             logAIError(diff, 'commit', serviceName, error, logging);
             subject.error(error);
+        } finally {
+            this.activeSignal = undefined;
         }
     };
 
     private async generateMessage(requestType: RequestType): Promise<AIResponse[]> {
         const diff = this.params.stagedDiff.diff;
-        const { systemPrompt, systemPromptPath, codeReviewPromptPath, logging, locale, generate, type, maxLength } = this.params.config;
-        const promptOptions: PromptOptions = {
-            ...DEFAULT_PROMPT_OPTIONS,
-            locale,
-            maxLength,
-            type,
-            generate,
-            systemPrompt,
-            systemPromptPath,
-            codeReviewPromptPath,
-            vcs_branch: this.params.branchName || '',
-        };
+        const { logging, generate, type } = this.params.config;
+        const promptOptions = this.buildPromptOptions();
         const generatedSystemPrompt = requestType === 'review' ? codeReviewPrompt(promptOptions) : generatePrompt(promptOptions);
 
         await this.checkIsAvailableOllama();
@@ -264,6 +261,7 @@ export class OllamaService extends AIService {
     private setupFetch = (input: any, init: any = {}): any => {
         return fetch(input as string | URL, {
             ...init,
+            ...(this.activeSignal ? { signal: this.activeSignal } : {}),
             dispatcher: new Agent({ headersTimeout: this.params.config.timeout }),
         });
     };

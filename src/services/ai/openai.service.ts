@@ -7,7 +7,7 @@ import { fromPromise } from 'rxjs/internal/observable/innerFrom';
 import { AIResponse, AIService, AIServiceError, AIServiceParams } from './ai.service.js';
 import { RequestType, logAIComplete, logAIError, logAIPayload, logAIPrompt, logAIRequest, logAIResponse } from '../../utils/ai-log.js';
 import { generateCommitMessage, isReasoningModel } from '../../utils/openai.js';
-import { DEFAULT_PROMPT_OPTIONS, PromptOptions, codeReviewPrompt, generatePrompt } from '../../utils/prompt.js';
+import { codeReviewPrompt, generatePrompt } from '../../utils/prompt.js';
 import { flattenDeep } from '../../utils/utils.js';
 
 export class OpenAIService extends AIService {
@@ -75,41 +75,18 @@ export class OpenAIService extends AIService {
         const { generate, type } = this.params.config;
 
         return this.createStreamingCommitMessages$(
-            subject => {
-                this.streamChunks(subject).catch(err => subject.error(err));
+            (subject, signal) => {
+                this.streamChunks(subject, signal).catch(err => subject.error(err));
             },
             type,
             generate
         );
     };
 
-    private streamChunks = async (subject: Subject<string>): Promise<void> => {
+    private streamChunks = async (subject: Subject<string>, signal: AbortSignal): Promise<void> => {
         const diff = this.params.stagedDiff.diff;
-        const {
-            systemPrompt,
-            systemPromptPath,
-            codeReviewPromptPath,
-            temperature,
-            logging,
-            locale,
-            generate,
-            type,
-            maxLength,
-            maxTokens,
-            timeout,
-        } = this.params.config;
-        const promptOptions: PromptOptions = {
-            ...DEFAULT_PROMPT_OPTIONS,
-            locale,
-            maxLength,
-            type,
-            generate,
-            systemPrompt,
-            systemPromptPath,
-            codeReviewPromptPath,
-            vcs_branch: this.params.branchName || '',
-        };
-        const generatedSystemPrompt = generatePrompt(promptOptions);
+        const { temperature, logging, maxTokens, timeout } = this.params.config;
+        const generatedSystemPrompt = generatePrompt(this.buildPromptOptions());
         const userPrompt = `Here is the diff: ${diff}`;
 
         const url = `${this.params.config.url}${this.params.config.path}`;
@@ -150,7 +127,7 @@ export class OpenAIService extends AIService {
         let accumulatedText = '';
 
         try {
-            const stream = await this.openAI.chat.completions.create(payload, { timeout });
+            const stream = await this.openAI.chat.completions.create(payload, { timeout, signal });
             const chatCompletionStream = stream as unknown as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>;
 
             for await (const chunk of chatCompletionStream) {
@@ -175,31 +152,8 @@ export class OpenAIService extends AIService {
 
     private async generateMessage(requestType: RequestType): Promise<AIResponse[]> {
         const diff = this.params.stagedDiff.diff;
-        const {
-            systemPrompt,
-            systemPromptPath,
-            codeReviewPromptPath,
-            temperature,
-            logging,
-            locale,
-            generate,
-            type,
-            maxLength,
-            proxy,
-            maxTokens,
-            timeout,
-        } = this.params.config;
-        const promptOptions: PromptOptions = {
-            ...DEFAULT_PROMPT_OPTIONS,
-            locale,
-            maxLength,
-            type,
-            generate,
-            systemPrompt,
-            systemPromptPath,
-            codeReviewPromptPath,
-            vcs_branch: this.params.branchName || '',
-        };
+        const { temperature, logging, generate, type, proxy, maxTokens, timeout } = this.params.config;
+        const promptOptions = this.buildPromptOptions();
         const generatedSystemPrompt = requestType === 'review' ? codeReviewPrompt(promptOptions) : generatePrompt(promptOptions);
 
         const results = await generateCommitMessage(
@@ -216,7 +170,8 @@ export class OpenAIService extends AIService {
             generatedSystemPrompt,
             logging,
             requestType,
-            proxy
+            proxy,
+            this.getCommitContext()
         );
 
         if (requestType === 'review') {

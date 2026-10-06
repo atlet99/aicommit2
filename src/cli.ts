@@ -15,12 +15,16 @@ import hookCommand, { isCalledFromGitHook } from './commands/hook.js';
 import logCommand from './commands/log.js';
 import preCommitHook from './commands/pre-commit-hook.js';
 import prepareCommitMessageHook from './commands/prepare-commit-msg-hook.js';
+import rewriteCommand from './commands/rewrite.js';
 import setupCommand from './commands/setup.js';
 import { statsCommand } from './commands/stats.js';
 import { watchGit } from './commands/watch-git.js';
-import { RawConfig, getConfig } from './utils/config.js';
+import { ConsoleManager } from './managers/console.manager.js';
+import { RawConfig, ValidConfig, getConfig } from './utils/config.js';
+import { handleCliError } from './utils/error.js';
 import { renderGroupedHelp } from './utils/help-renderer.js';
 import { initializeLogger, logger } from './utils/logger.js';
+import { sharedMessageFlags } from './utils/message-flags.js';
 
 const rawArgv = process.argv.slice(2);
 const { version, description } = pkg;
@@ -35,16 +39,7 @@ cli(
          * https://git-scm.com/docs/git-commit
          */
         flags: {
-            locale: {
-                type: String,
-                description: 'Locale to use for the generated commit messages (default: en)',
-                alias: 'l',
-            },
-            generate: {
-                type: Number,
-                description: 'Number of messages to generate (Warning: generating multiple costs more) (default: 1)',
-                alias: 'g',
-            },
+            ...sharedMessageFlags,
             exclude: {
                 type: [String],
                 description: 'Files to exclude from AI analysis',
@@ -55,11 +50,6 @@ cli(
                 description: 'Automatically stage changes in tracked files for the commit',
                 alias: 'a',
                 default: false,
-            },
-            type: {
-                type: String,
-                description: 'Type of commit message to generate (default: conventional)',
-                alias: 't',
             },
             confirm: {
                 type: Boolean,
@@ -73,11 +63,6 @@ cli(
                 alias: 'c',
                 default: false,
             },
-            prompt: {
-                type: String,
-                description: 'Custom prompt to let users fine-tune provided prompt',
-                alias: 'p',
-            },
             'watch-commit': {
                 type: Boolean,
                 default: false,
@@ -90,35 +75,6 @@ cli(
             'pre-commit': {
                 type: Boolean,
                 description: 'Run in pre-commit Framework, allowing chaining with other hooks',
-                default: false,
-            },
-            'include-body': {
-                type: Boolean,
-                description: 'Force include commit body in all generated messages',
-                alias: 'i',
-                default: false,
-            },
-            'auto-select': {
-                type: Boolean,
-                description: 'Automatically select the first valid generated message',
-                alias: 's',
-                default: false,
-            },
-            edit: {
-                type: Boolean,
-                description: 'Open the AI-generated commit message in your default editor',
-                alias: 'e',
-                default: false,
-            },
-            'disable-lowercase': {
-                type: Boolean,
-                description: 'Disable automatic lowercase conversion of commit messages',
-                default: false,
-            },
-            verbose: {
-                type: Boolean,
-                description: 'Enable verbose logging for this run',
-                alias: 'v',
                 default: false,
             },
             git: {
@@ -154,7 +110,7 @@ cli(
             },
         },
 
-        commands: [configCommand, doctorCommand, githubLoginCommand, hookCommand, logCommand, setupCommand, statsCommand],
+        commands: [configCommand, doctorCommand, githubLoginCommand, hookCommand, logCommand, rewriteCommand, setupCommand, statsCommand],
 
         help: {
             description,
@@ -169,7 +125,20 @@ cli(
             cliOverrides.logLevel = 'verbose';
         }
 
-        const config = await getConfig(cliOverrides, rawArgv);
+        // Nothing above catches here, so an unreadable or invalid config file would surface
+        // as a raw unhandled rejection instead of the message it carries.
+        let config: ValidConfig;
+        try {
+            config = await getConfig(cliOverrides, rawArgv);
+        } catch (error) {
+            const consoleManager = new ConsoleManager();
+            consoleManager.printError((error as Error).message);
+            // Parsing stops at the first bad value, so point at the command that reports all of them
+            consoleManager.printInfo('Run `aicommit2 config validate` to check the whole configuration file.');
+            handleCliError(error);
+            process.exit(1);
+        }
+
         await initializeLogger(config);
         logger.info(`aicommit2 version: ${version}`);
         if (argv.flags['pre-commit']) {

@@ -81,6 +81,7 @@ _aicommit2_ automatically generates commit messages using AI. It supports [Git](
 - **[OpenAI API Compatibility](docs/providers/compatible.md)**: Support for any service that implements the OpenAI API specification
 - **[Reactive CLI](#usage)**: Enables simultaneous requests to multiple AIs and selection of the best commit message
 - **[Code Review](#code-review)**: AI-powered structured code review with severity levels before committing
+- **[Commit Rewrite](#usage)**: Rewrite the commit message of any existing commit with AI (`aicommit2 rewrite`)
 - **[Git Hook Integration](#git-hooks)**: Can be used as a prepare-commit-msg hook
 - **[Custom Prompt](#custom-prompt-template)**: Supports user-defined system prompt templates
 - **[Diff Compression](#diff-compression)**: Reduces token usage by 30-60% with smart diff compression
@@ -91,6 +92,8 @@ _aicommit2_ automatically generates commit messages using AI. It supports [Git](
 |----------|---------------|---------------|
 | OpenAI | `gpt-4o-mini` | [Guide](docs/providers/openai.md) |
 | Copilot SDK (Preview) | `gpt-4.1` | [Guide](docs/providers/copilot-sdk.md) |
+| Claude Code (Preview) | `sonnet` | [Guide](docs/providers/claude-code.md) |
+| Gemini CLI (Preview) | *(CLI default)* | [Guide](docs/providers/gemini-cli.md) |
 | OpenRouter | `free` | [Guide](docs/providers/openrouter.md) |
 | Anthropic | `claude-sonnet-4-20250514` | [Guide](docs/providers/anthropic.md) |
 | Gemini | `gemini-3-flash-preview` | [Guide](docs/providers/gemini.md) |
@@ -99,7 +102,7 @@ _aicommit2_ automatically generates commit messages using AI. It supports [Git](
 | Cohere | `command-a-03-2025` | [Guide](docs/providers/cohere.md) |
 | Groq | `llama-3.3-70b-versatile` | [Guide](docs/providers/groq.md) |
 | Perplexity | `sonar` | [Guide](docs/providers/perplexity.md) |
-| DeepSeek | `deepseek-chat` | [Guide](docs/providers/deepseek.md) |
+| DeepSeek | `deepseek-v4-flash` | [Guide](docs/providers/deepseek.md) |
 | GitHub Models | `openai/gpt-4o-mini` | [Guide](docs/providers/github-models.md) |
 | Bedrock | `anthropic.claude-haiku-4-5-20251001-v1:0` | [Guide](docs/providers/bedrock.md) |
 | Ollama | *(user configured)* | [Guide](docs/providers/ollama.md) |
@@ -109,6 +112,10 @@ _aicommit2_ automatically generates commit messages using AI. It supports [Git](
 > 📘 GitHub note: `COPILOT_SDK` uses Copilot CLI authentication (`Copilot Requests` permission), while `GITHUB_MODELS` uses GitHub Models API tokens (`models: read`).
 >
 > 📘 Copilot SDK stable setup example (`config.ini` + env): [Copilot SDK Guide](docs/providers/copilot-sdk.md#recommended-configini-stable-baseline).
+>
+> 📘 Claude Code note: `CLAUDE_CODE` runs your locally installed Claude Code CLI with your Claude subscription (Pro/Max) — no API key. It is meant for terminal usage of `aicommit2`; it is not intended to be called from inside a Claude Code agent session. See [Claude Code Guide](docs/providers/claude-code.md).
+>
+> 📘 Gemini CLI note: `GEMINI_CLI` runs your locally installed Gemini CLI with your Gemini login (free tier or subscription) — no API key. It is the subscription counterpart to the API-key `GEMINI` provider. See [Gemini CLI Guide](docs/providers/gemini-cli.md).
 
 ## Setup
 
@@ -125,6 +132,8 @@ npm install -g aicommit2
 ```
 
 > ⚠️ For npm installation, the minimum supported version of Node.js is v18. Check your Node.js version with `node --version`.
+
+> ⚠️ Homebrew installation does not include [Copilot SDK](docs/providers/copilot-sdk.md) support due to its proprietary dependency. Use npm if you need Copilot SDK.
 
 2. Configure your AI provider(s) (**at least ONE provider must be configured**):
 
@@ -397,7 +406,9 @@ Run `aicommit2 --help` to see all available options grouped by category.
 
 - `--all` or `-a`: Automatically stage changes in tracked files for the commit (default: **false**)
 - `--confirm` or `-y`: Skip confirmation when committing after message generation (default: **false**)
-- `--auto-select` or `-s`: Automatically select the first valid generated message (single provider or OpenRouter `model=free`) (default: **false**)
+- `--auto-select` or `-s`: Automatically select the first successfully generated message (default: **false**)
+  - Runs non-interactively: skips both the message picker and the commit confirmation, regardless of how many AI providers are configured
+  - With [`codeReview`](./docs/settings.md#codereview) enabled, the first review is printed in full instead of opening the review list. Critical findings are printed as a warning and the run continues, since there is no prompt to answer
 - `--edit` or `-e`: Open the AI-generated commit message in your default editor (default: **false**)
 - `--clipboard` or `-c`: Copy the selected message to clipboard and exit **without committing** (default: **false**)
 - `--dry-run` or `-d`: Generate commit message without committing (default: **false**)
@@ -449,9 +460,11 @@ In addition to the main commit message generation, aicommit2 provides several ut
 | Command | Description |
 |---------|-------------|
 | `aicommit2 setup` | Interactive setup wizard for configuring AI providers |
+| `aicommit2 setup lazygit` | Set up the [LazyGit integration](#lazygit) |
 | `aicommit2 config` | Manage configuration (get, set, list, del) |
-| `aicommit2 doctor` | Check health status of AI providers |
+| `aicommit2 doctor` | Check health status of AI providers, integrations and the installed version |
 | `aicommit2 stats` | View usage statistics and performance metrics |
+| `aicommit2 rewrite` | Rewrite the commit message of any commit using AI |
 | `aicommit2 hook` | Install/uninstall Git prepare-commit-msg hook |
 | `aicommit2 log` | Manage log files |
 | `aicommit2 github-login` | Login to GitHub for GitHub Models access |
@@ -476,6 +489,12 @@ aicommit2 stats clear   # Clear all stats
 # Git hook
 aicommit2 hook install
 aicommit2 hook uninstall
+
+# Rewrite commit message
+aicommit2 rewrite                 # Rewrite HEAD commit message
+aicommit2 rewrite abc1234         # Rewrite specific commit
+aicommit2 rewrite HEAD~2 --dry-run   # Preview without rewriting
+aicommit2 rewrite -i              # Include the commit body in the rewritten message
 ```
 
 > GitHub Models tip: use `aicommit2 github-login` and set `GITHUB_MODELS.model` in `publisher/model` format (for example, `openai/gpt-5`).
@@ -484,9 +503,44 @@ aicommit2 hook uninstall
 
 ### LazyGit
 
-_aicommit2_ supports non-interactive JSON output mode for seamless integration with [LazyGit](https://github.com/jesseduffield/lazygit).
+_aicommit2_ integrates with [LazyGit](https://github.com/jesseduffield/lazygit) so you can generate commit messages without leaving the LazyGit UI.
 
-#### Setup
+#### Quick Setup
+
+```bash
+aicommit2 setup lazygit
+```
+
+This detects your LazyGit config file, backs it up, and adds a custom command. Then in LazyGit:
+
+1. Stage your changes
+2. Press `c` in the Files panel — the full aicommit2 UI opens (multi-provider streaming)
+3. Select a message to commit
+
+Options:
+
+- `--key <key>` — use a different keybinding (default: `c`, which overrides LazyGit's default commit key)
+- `--mode fzf` — install the fzf-based picker with subject + body preview instead (requires `jq` and `fzf`; bound to `C` by default)
+- `--force` — overwrite an existing aicommit2 integration
+
+#### Manual Setup
+
+Add the following to your LazyGit config file (`~/.config/lazygit/config.yml` or `~/Library/Application Support/lazygit/config.yml` on macOS):
+
+```yaml
+customCommands:
+  - key: "c"
+    context: "files"
+    description: "Generate commit message with aicommit2"
+    command: "aicommit2"
+    output: terminal
+```
+
+This runs the full aicommit2 interactive UI in a terminal — streaming, multi-provider, no output parsing involved.
+
+> **Note:** This overrides LazyGit's default `c` (commit) key. You can change the key to another value (e.g., `<c-a>`) if you prefer to keep the default behavior.
+
+#### Advanced: JSON Output (menuFromCommand)
 
 Use the `--output json` flag to get AI-generated commit messages in JSON Lines format:
 
@@ -496,11 +550,7 @@ aicommit2 --output json
 # Output: {"subject":"fix: resolve login bug","body":"Fixes issue with session handling"}
 ```
 
-Each line is a separate JSON object with `subject` and `body` fields, compatible with LazyGit's `menuFromCommand` prompt type.
-
-#### LazyGit Configuration
-
-Add the following to your LazyGit config file (`~/.config/lazygit/config.yml` or `~/Library/Application Support/lazygit/config.yml` on macOS):
+Each line is a separate JSON object with `subject` and `body` fields, compatible with LazyGit's `menuFromCommand` prompt type. On failure, an `{"error":"..."}` object is written to stdout and a readable message to stderr (exit code 1).
 
 ```yaml
 customCommands:
@@ -520,17 +570,13 @@ customCommands:
     command: bash -c 'MSG="{{ .Form.Commit }}" && SUBJ="${MSG%%<SEP>*}" && BODY="${MSG#*<SEP>}" && git commit -e -m "$SUBJ" ${BODY:+-m "$BODY"}'
 ```
 
-> **Note:** This overrides LazyGit's default `c` (commit) key. You can change the key to another value (e.g., `<c-a>`) if you prefer to keep the default behavior.
-
-#### Usage in LazyGit
-
-1. Stage your changes in LazyGit
-2. Press `c` to generate AI commit messages and select one
-3. The editor opens with the selected message for final review
+> **Warning:** The regex filter cannot handle subjects containing double quotes, and multi-line bodies arrive as escaped `\n` sequences. Prefer the [Quick Setup](#quick-setup) recipe above, or the fzf variant below for messages with bodies.
 
 #### Advanced: fzf Preview with Body
 
 For detailed commit messages with **subject + body**, use the fzf-based approach. This uses `--include-body` (`-i`) flag to generate detailed body content and shows a preview window before committing.
+
+> **Tip:** `aicommit2 setup lazygit --mode fzf` installs the script and config entry automatically. The steps below are for manual setup.
 
 **Requirements:** `jq` and `fzf` must be installed (`brew install jq fzf`).
 
@@ -602,6 +648,8 @@ In the Git repository you want to install the hook in:
 aicommit2 hook install
 ```
 
+The hook location is resolved by Git itself, so linked worktrees (`git worktree add`) and a custom `core.hooksPath` are supported.
+
 #### Manual Installation
 
 If you prefer to set up the hook manually, create or edit the `.git/hooks/prepare-commit-msg` file:
@@ -658,7 +706,7 @@ Or manually delete the `.git/hooks/prepare-commit-msg` file.
 
 ### Health Check
 
-Use the `doctor` command to check the status of your configured AI providers:
+Use the `doctor` command to check the status of your configured AI providers and integrations:
 
 ```bash
 aicommit2 doctor
@@ -675,7 +723,10 @@ Providers:
   ⏭️ ANTHROPIC      Not configured
   ⚠️ GEMINI         API key configured
 
-Summary: 2 healthy, 0 error, 1 warning, 1 skipped
+Integrations:
+  ✅ LAZYGIT        Integration configured (~/.config/lazygit/config.yml)
+
+Summary: 3 healthy, 0 error, 1 warning, 1 skipped
 ```
 
 Status icons:
@@ -790,6 +841,7 @@ directly in `config.ini` using dotted keys, or set with JSON via `aicommit2 conf
 - READ: `aicommit2 config get [<key> [<key> ...]]`
 - SET: `aicommit2 config set <key>=<value>`
 - DELETE: `aicommit2 config del <config-name>`
+- VALIDATE: `aicommit2 config validate`
 
 Example:
 
@@ -808,6 +860,27 @@ aicommit2 config set OPENAI.generate=3 GEMINI.temperature=0.5
 aicommit2 config del OPENAI.key
 aicommit2 config del GEMINI
 aicommit2 config del timeout
+
+# Check the configuration file
+aicommit2 config validate
+```
+
+#### Validating the Configuration
+
+A hand-edited `config.ini` can contain mistakes that a normal run stays silent about: a
+section whose name is not uppercase is dropped entirely, and an option no provider
+accepts is ignored. `aicommit2 config validate` reports them together with any invalid
+values, and exits with a non-zero status when it finds an error. Values are checked after
+environment variable expansion, so run it in the same environment your commits run in:
+
+```
+Config file: ~/.config/aicommit2/config.ini
+
+✖ [openai]: Invalid section name, so the whole section is ignored. Names must be uppercase letters, numbers and underscores. Did you mean [OPENAI]?
+! OPENAI.modell: Unknown option, silently ignored. Did you mean `model`?
+✖ OPENAI.temperature: Invalid config property temperature: Must be decimal between 0 and 2
+
+2 error(s), 1 warning(s)
 ```
 
 ### Environment Variables
@@ -933,7 +1006,7 @@ For detailed information about all available settings, see the [General Settings
 | `systemPromptPath`     | Path to custom system prompt file                                   | -            |
 | `modelNameDisplay`     | Model name display in CLI labels (`none` / `short` / `full`)       | short        |
 | `stream`               | **Experimental.** Enable streaming for real-time commit message generation | false        |
-| `diffCompression`      | Diff compression mode (`none` / `compact`)                          | none         |
+| `diffCompression`      | Diff compression mode (`auto` / `compact` / `none`)                 | auto         |
 | `maxHunkLines`         | Max lines per hunk in compressed diff (0 = unlimited)               | 0            |
 | `maxDiffLines`         | Max total lines in compressed diff (0 = unlimited)                  | 0            |
 | `diffContext`           | Number of context lines in git diff (0-10)                          | 3            |
@@ -968,13 +1041,15 @@ aicommit2 config set ANTHROPIC.includeBody=true
 
 aicommit2 can compress git diffs before sending to AI providers, reducing token usage by 30-60%. Inspired by [RTK](https://github.com/rtk-ai/rtk)'s token optimization techniques.
 
-When enabled (`compact` mode), the compressor:
+When compressing (`compact` mode, or `auto` mode on a large diff), the compressor:
 - Strips diff metadata headers (`diff --git`, `index`, `---/+++`)
 - Minimizes context lines (keeps only lines adjacent to changes, replaces distant context with `...`)
 - Caps large hunks and total diff size to protect model context windows
 
+The default `auto` mode sends diffs under 100 KB untouched and compresses larger ones with a 150-line hunk cap and a 3,000-line total cap (unless you set `maxHunkLines` / `maxDiffLines` yourself), so a big staged change no longer fails at the provider.
+
 ```bash
-# Enable diff compression globally
+# Always compress, regardless of diff size
 aicommit2 config set diffCompression=compact
 
 # Or per model — useful for models with smaller context windows
@@ -987,7 +1062,10 @@ aicommit2 config set maxHunkLines=200   # max lines per hunk (0=unlimited)
 aicommit2 config set maxDiffLines=1000  # max total diff lines (0=unlimited)
 aicommit2 config set diffContext=1      # reduce git context lines (default: 3)
 
-# Disable compression (default)
+# Restore the default (compress only large diffs)
+aicommit2 config set diffCompression=auto
+
+# Never compress, even for large diffs (behavior of versions before auto mode)
 aicommit2 config set diffCompression=none
 ```
 
@@ -1217,7 +1295,7 @@ Check the installed version with:
 aicommit2 --version
 ```
 
-If it's not the [latest version](https://github.com/tak-bro/aicommit2/releases/latest), run:
+`aicommit2 doctor` also compares the installed version with the npm registry and prints the upgrade command for your install method. If it's not the [latest version](https://github.com/tak-bro/aicommit2/releases/latest), run:
 
 ```bash
 # Via Homebrew
@@ -1271,6 +1349,14 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
     <td align="center"><a href="https://github.com/totoroot"><img src="https://avatars.githubusercontent.com/totoroot" width="100px;" alt=""/><br /><sub><b>@totoroot</b></sub></a><br /><a href="https://github.com/tak-bro/aicommit2/commits?author=totoroot" title="Code">💻</a></td>
     <td align="center"><a href="https://github.com/lawrence3699"><img src="https://avatars.githubusercontent.com/lawrence3699" width="100px;" alt=""/><br /><sub><b>@lawrence3699</b></sub></a><br /><a href="https://github.com/tak-bro/aicommit2/commits?author=lawrence3699" title="Code">💻</a></td>
     <td align="center"><a href="https://github.com/atlet99"><img src="https://avatars.githubusercontent.com/atlet99" width="100px;" alt=""/><br /><sub><b>@atlet99</b></sub></a><br /><a href="https://github.com/tak-bro/aicommit2/commits?author=atlet99" title="Code">💻</a></td>
+    <td align="center"><a href="https://github.com/HoChihchou"><img src="https://avatars.githubusercontent.com/HoChihchou" width="100px;" alt=""/><br /><sub><b>@HoChihchou</b></sub></a><br /><a href="https://github.com/tak-bro/aicommit2/commits?author=HoChihchou" title="Code">💻</a></td>
+  </tr>
+  <tr>
+    <td align="center"><a href="https://github.com/chenmi319"><img src="https://avatars.githubusercontent.com/chenmi319" width="100px;" alt=""/><br /><sub><b>@chenmi319</b></sub></a><br /><a href="https://github.com/tak-bro/aicommit2/commits?author=chenmi319" title="Code">💻</a></td>
+    <td align="center"><a href="https://github.com/JiwaniZakir"><img src="https://avatars.githubusercontent.com/JiwaniZakir" width="100px;" alt=""/><br /><sub><b>@JiwaniZakir</b></sub></a><br /><a href="https://github.com/tak-bro/aicommit2/commits?author=JiwaniZakir" title="Code">💻</a></td>
+    <td align="center"><a href="https://github.com/qistchan"><img src="https://avatars.githubusercontent.com/qistchan" width="100px;" alt=""/><br /><sub><b>@qistchan</b></sub></a><br /><a href="https://github.com/tak-bro/aicommit2/commits?author=qistchan" title="Code">💻</a></td>
+    <td align="center"><a href="https://github.com/Cassius0924"><img src="https://avatars.githubusercontent.com/Cassius0924" width="100px;" alt=""/><br /><sub><b>@Cassius0924</b></sub></a><br /><a href="https://github.com/tak-bro/aicommit2/commits?author=Cassius0924" title="Code">💻</a></td>
+    <td align="center"><a href="https://github.com/Xyhlon"><img src="https://avatars.githubusercontent.com/Xyhlon" width="100px;" alt=""/><br /><sub><b>@Xyhlon</b></sub></a><br /><a href="https://github.com/tak-bro/aicommit2/commits?author=Xyhlon" title="Code">💻</a></td>
   </tr>
 </table>
 <!-- markdownlint-restore -->

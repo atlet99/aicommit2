@@ -5,10 +5,11 @@ import path from 'path';
 
 import { execa } from 'execa';
 import inquirer from 'inquirer';
-import { ReactiveListChoice, buildBounceFrames } from 'inquirer-reactive-list-prompt';
+import { ReactiveListChoice } from 'inquirer-reactive-list-prompt';
 import { lastValueFrom, toArray } from 'rxjs';
 
 import { getAvailableAIs } from './get-available-ais.js';
+import { CommitChoice, CommitMessageResult, selectCodeReviewAutomatically, selectMessageAutomatically } from './select-message.js';
 import { AIRequestManager } from '../managers/ai-request.manager.js';
 import { ConsoleManager } from '../managers/console.manager.js';
 import {
@@ -19,15 +20,17 @@ import {
     emptyCodeReview,
 } from '../managers/reactive-prompt.manager.js';
 import { recordSelection } from '../services/stats/index.js';
-import { ModelName, RawConfig, ValidConfig, applyDisableLowerCaseToConfig, applyIncludeBodyToConfig, getConfig } from '../utils/config.js';
+import { ModelName, getConfig } from '../utils/config.js';
 import { ErrorCode, ErrorMessages } from '../utils/error-messages.js';
 import { KnownError, handleCliError } from '../utils/error.js';
-import { validateSystemPrompt } from '../utils/prompt.js';
+import { MessageFlagValues, buildMessageConfigOverrides, forceMessageFlagsOnProviders } from '../utils/message-flags.js';
+import { CRITICAL_ISSUES_MARKER, validateSystemPrompt } from '../utils/prompt.js';
 import {
     CommitOptions,
     applyDiffCompression,
     assertGitRepo,
     getBranchName,
+    getRecentCommits,
     getStagedDiff,
     getVCSName,
     commitChanges as vcsCommitChanges,
@@ -37,28 +40,9 @@ import type { Subscription } from 'rxjs';
 
 const consoleManager = new ConsoleManager();
 
-const AUTO_SELECT_SPINNER = { interval: 80, frames: buildBounceFrames(14, 4) };
-
 export interface JsonCommitMessage {
     subject: string;
     body: string;
-}
-
-/**
- * Extended ReactiveListChoice with provider metadata for selection tracking
- */
-interface CommitChoice extends ReactiveListChoice {
-    provider?: string;
-    model?: string;
-}
-
-/**
- * Result of commit message selection
- */
-interface CommitMessageResult {
-    value: string;
-    provider: string;
-    model: string;
 }
 
 export default async (
@@ -112,29 +96,19 @@ export default async (
             initSpinner.text = 'Loading configuration...';
         }
 
-        const configOverrides: RawConfig = {
-            locale: locale?.toString() as string,
-            generate: generate?.toString() as string,
-            type: commitType?.toString() as string,
-            systemPrompt: prompt?.toString() as string,
-            ...(includeBody === true && { includeBody: 'true' }),
-            ...(disableLowerCase === true && { disableLowerCase: 'true' }),
+        const messageFlags: MessageFlagValues = {
+            locale,
+            generate,
+            type: commitType,
+            prompt,
+            includeBody,
+            disableLowerCase,
+            verbose,
         };
 
-        if (verbose) {
-            configOverrides.logLevel = 'verbose';
-        }
+        const config = await getConfig(buildMessageConfigOverrides(messageFlags), rawArgv);
 
-        const config = await getConfig(configOverrides, rawArgv);
-
-        const shouldIncludeBody = includeBody === true || config.includeBody === true;
-        if (shouldIncludeBody) {
-            applyIncludeBodyToConfig(config);
-        }
-
-        if (disableLowerCase) {
-            applyDisableLowerCaseToConfig(config);
-        }
+        forceMessageFlagsOnProviders(config, messageFlags);
 
         await validateSystemPrompt(config);
 
@@ -173,7 +147,8 @@ export default async (
         }
 
         const branchName = await getBranchName();
-        const aiRequestManager = new AIRequestManager(config, staged, branchName);
+        const recentCommits = await getRecentCommits();
+        const aiRequestManager = new AIRequestManager(config, staged, branchName, recentCommits);
 
         // JSON output mode: skip TUI, collect all messages, output as JSON Lines
         // Each object on its own line for LazyGit menuFromCommand compatibility
@@ -187,10 +162,10 @@ export default async (
 
         const codeReviewAIs = getAvailableAIs(config, 'review');
         if (codeReviewAIs.length > 0) {
-            await handleCodeReview(aiRequestManager, codeReviewAIs);
+            await handleCodeReview(aiRequestManager, codeReviewAIs, autoSelect);
         }
 
-        const commitResult = await handleCommitMessage(aiRequestManager, availableAIs, autoSelect, isFreeModelRaceConfigured(config));
+        const commitResult = await handleCommitMessage(aiRequestManager, availableAIs, autoSelect);
 
         // Record selection for stats (fire-and-forget, enabled by default)
         if (config.useStats !== false) {
@@ -242,7 +217,7 @@ export default async (
             process.exit();
         }
 
-        if (confirm || (autoSelect && (availableAIs.length === 1 || isFreeModelRaceConfigured(config)))) {
+        if (confirm || autoSelect) {
             await commitChanges(selectedCommitMessage, rawArgv, commitOptions);
             process.exit();
         }
@@ -264,9 +239,11 @@ export default async (
         process.exit();
     })().catch(error => {
         if (outputFormat === 'json') {
-            // Output error as JSON for LazyGit integration
-            const errorJson = { error: error.message || 'Unknown error occurred' };
-            process.stderr.write(JSON.stringify(errorJson) + '\n');
+            // Machine-readable error on stdout (menuFromCommand only reads stdout),
+            // human-readable error on stderr (lazygit shows stderr on non-zero exit)
+            const errorMessage = error.message || 'Unknown error occurred';
+            process.stdout.write(JSON.stringify({ error: errorMessage }) + '\n');
+            process.stderr.write(`aicommit2: ${errorMessage}\n`);
             process.exit(1);
         }
         consoleManager.printError(error.message);
@@ -274,11 +251,21 @@ export default async (
         process.exit(1);
     });
 
-async function handleCodeReview(aiRequestManager: AIRequestManager, availableAIs: ModelName[]) {
+async function handleCodeReview(aiRequestManager: AIRequestManager, availableAIs: ModelName[], autoSelect: boolean) {
     const codeReviewPromptManager = new ReactivePromptManager(codeReviewLoader);
     let codeReviewSubscription: Subscription | null = null;
 
     try {
+        if (autoSelect) {
+            const review = await selectCodeReviewAutomatically(aiRequestManager, availableAIs, codeReviewPromptManager);
+            // The interactive path asks whether to continue on critical issues. There is no
+            // prompt here, and --auto-select means the run goes through, so warn instead.
+            if (review.includes(CRITICAL_ISSUES_MARKER)) {
+                consoleManager.printWarning('Critical issues found in code review.');
+            }
+            return;
+        }
+
         const codeReviewInquirer = codeReviewPromptManager.initPrompt({
             ...DEFAULT_INQUIRER_OPTIONS,
             name: 'codeReviewPrompt',
@@ -309,7 +296,7 @@ async function handleCodeReview(aiRequestManager: AIRequestManager, availableAIs
 
         consoleManager.moveCursorUp();
 
-        const hasCritical = selectedCodeReview.includes('<!-- HAS_CRITICAL_ISSUES -->');
+        const hasCritical = selectedCodeReview.includes(CRITICAL_ISSUES_MARKER);
         const confirmMessage = hasCritical
             ? 'Critical issues found in code review. Continue without fixing?'
             : 'Will you continue without changing the code?';
@@ -335,98 +322,44 @@ async function handleCodeReview(aiRequestManager: AIRequestManager, availableAIs
     }
 }
 
-const isFreeModelRaceConfigured = (config: ValidConfig): boolean => {
-    const openrouter = config.OPENROUTER;
-    if (!openrouter || openrouter.disabled) {
-        return false;
-    }
-    return (openrouter.model ?? []).some(entry => entry.trim().toLowerCase() === 'free');
-};
-
 const handleCommitMessage = async (
     aiRequestManager: AIRequestManager,
     availableAIs: ModelName[],
-    autoSelect: boolean,
-    freeModelRace: boolean
+    autoSelect: boolean
 ): Promise<CommitMessageResult> => {
     const commitMsgPromptManager = new ReactivePromptManager(commitMsgLoader);
     let commitMsgSubscription: Subscription | null = null;
 
     try {
-        if (autoSelect && (availableAIs.length === 1 || freeModelRace)) {
-            // Auto-select the first valid response and stop waiting for the rest.
-            let firstValidMessage: CommitChoice | null = null;
-            const errorMessages: string[] = [];
-            consoleManager.showLoader(commitMsgLoader.startOption.text, AUTO_SELECT_SPINNER);
-
-            commitMsgSubscription = aiRequestManager.createCommitMsgRequests$(availableAIs).subscribe({
-                next: (choice: ReactiveListChoice) => {
-                    commitMsgPromptManager.refreshChoices(choice);
-
-                    if (choice.isError && choice.value) {
-                        errorMessages.push(choice.value);
-                    }
-
-                    // Skip streaming preview/sentinel choices — only final results can be auto-selected
-                    const isStreamingChoice = 'streamKey' in choice;
-                    if (!firstValidMessage && !isStreamingChoice && choice.value && !choice.isError && !choice.disabled) {
-                        firstValidMessage = choice as CommitChoice;
-                        commitMsgSubscription?.unsubscribe();
-                    }
-                },
-                error: error => {
-                    console.error('Commit message generation error:', error);
-                    commitMsgPromptManager.checkErrorOnChoices(false);
-                },
-                complete: () => commitMsgPromptManager.checkErrorOnChoices(false),
-            });
-
-            await new Promise<void>(resolve => {
-                commitMsgSubscription?.add(() => resolve());
-            });
-
-            consoleManager.stopLoader();
-
-            if (!firstValidMessage) {
-                const reason = errorMessages.length > 0 ? ` ${errorMessages.join(' | ')}` : '';
-                throw new KnownError(`No valid commit message was generated.${reason}`);
-            }
-
-            consoleManager.print(`\n${firstValidMessage.name}\n`);
-            return {
-                value: firstValidMessage.value,
-                provider: firstValidMessage.provider || 'unknown',
-                model: firstValidMessage.model || 'unknown',
-            };
+        if (autoSelect) {
+            return await selectMessageAutomatically(aiRequestManager, availableAIs, commitMsgPromptManager);
         }
 
         // Store choices with metadata for later lookup
         const choiceMap = new Map<string, CommitChoice>();
+        // Progress shown next to the bar as (done/total): final results (including error
+        // entries) over the number of AI requests in flight. Streaming previews excluded.
+        const totalRequests = aiRequestManager.countRequests(availableAIs);
+        let settledRequests = 0;
 
+        // Mount the prompt up front. The library's loading bar hides the question while the
+        // list is empty, so there is no premature "Pick a commit message" + empty list — the
+        // bar animates through generation and the list fills in as messages stream.
         const commitMsgInquirer = commitMsgPromptManager.initPrompt();
-
-        commitMsgPromptManager.startLoader();
-
-        // QW-3: Track received messages to show progress in loader
-        let receivedCount = 0;
+        // Single emission: carries both `isLoading: true` and the initial (0/N) progress.
+        commitMsgPromptManager.updateLoaderProgress(settledRequests, totalRequests);
 
         commitMsgSubscription = aiRequestManager.createCommitMsgRequests$(availableAIs).subscribe({
             next: (choice: ReactiveListChoice) => {
                 const commitChoice = choice as CommitChoice;
-                // Store choice by value for lookup after selection
                 if (commitChoice.value) {
                     choiceMap.set(commitChoice.value, commitChoice);
                 }
-
-                // Update loader with response progress
-                const isValidResponse = choice.value && !choice.isError && !choice.disabled;
-                if (isValidResponse) {
-                    receivedCount++;
-                    commitMsgPromptManager.updateLoaderText(
-                        `AI is analyzing your changes (${receivedCount} message${receivedCount > 1 ? 's' : ''} generated)`
-                    );
+                const isFinalResult = !('streamKey' in choice);
+                if (isFinalResult && settledRequests < totalRequests) {
+                    settledRequests++;
+                    commitMsgPromptManager.updateLoaderProgress(settledRequests, totalRequests);
                 }
-
                 commitMsgPromptManager.refreshChoices(choice);
             },
             error: error => {
@@ -531,9 +464,7 @@ const handleJsonOutput = async (aiRequestManager: AIRequestManager, availableAIs
     const validChoices = choices.filter(choice => choice.value && !choice.isError && !choice.disabled);
 
     if (validChoices.length === 0) {
-        const errorMessages = choices.filter(choice => choice.isError && choice.value).map(choice => choice.value);
-        const reason = errorMessages.length > 0 ? ` ${errorMessages.join(' | ')}` : '';
-        throw new KnownError(`No valid commit messages were generated.${reason}`);
+        throw new KnownError('No valid commit messages were generated');
     }
 
     return validChoices.map(({ value = '' }) => {

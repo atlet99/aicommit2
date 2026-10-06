@@ -307,3 +307,32 @@ export const getBranchName = async (): Promise<string> => {
     const adapter = await getVCSAdapter();
     return adapter.getBranchName();
 };
+
+export const getRecentCommits = async (count: number = 5, excludeHash?: string): Promise<string> => {
+    const adapter = await getVCSAdapter();
+    return adapter.getRecentCommits(count, excludeHash);
+};
+
+export const rewriteCommit = async (message: string, commitHash: string = 'HEAD'): Promise<void> => {
+    const adapter = await getVCSAdapter();
+    if (!adapter.rewriteCommit) {
+        throw new KnownError(`Rewrite is not supported for ${adapter.name} repositories. Only Git is supported.`);
+    }
+    await adapter.rewriteCommit(message, commitHash);
+};
+
+export const getCommitMessage = async (commitHash: string = 'HEAD'): Promise<string> => {
+    const adapter = await getVCSAdapter();
+    if (!adapter.getCommitMessage) {
+        return '';
+    }
+    return adapter.getCommitMessage(commitHash);
+};
+
+export const isCommitPushed = async (commitHash: string = 'HEAD'): Promise<boolean> => {
+    const adapter = await getVCSAdapter();
+    if (!adapter.isCommitPushed) {
+        return false;
+    }
+    return adapter.isCommitPushed(commitHash);
+};
